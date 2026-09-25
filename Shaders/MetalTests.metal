@@ -44,6 +44,26 @@ fragment float4 samplePositionFragment() {
     return float4(get_sample_position(2), 0.25f, 1.0f);
 }
 
+struct MultiviewVertex {
+    float4 position [[position]];
+    uint amplificationId [[flat]];
+    uint targetLayer [[render_target_array_index]];
+};
+
+vertex MultiviewVertex multiviewVertex(uint vertexId [[vertex_id]], uint amplificationId [[amplification_id]]) {
+    const float2 positions[] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
+    return {float4(positions[vertexId], 0, 1), amplificationId, 0};
+}
+
+vertex MultiviewVertex multiviewFlexibleVertex(uint vertexId [[vertex_id]], uint amplificationId [[amplification_id]], constant NriMultiview& views [[buffer(3)]]) {
+    const float2 positions[] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
+    return {float4(positions[vertexId], 0, 1), amplificationId, views.viewIndices[amplificationId]};
+}
+
+fragment float4 multiviewFragment(MultiviewVertex input [[stage_in]]) {
+    return input.amplificationId == 0 ? float4(1, 0, 0, 1) : float4(0, 1, 0, 1);
+}
+
 struct DepthStencilViews {
     ulong depthAddress;
     depth2d<float> depth;

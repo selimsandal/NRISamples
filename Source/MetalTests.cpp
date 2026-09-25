@@ -4,6 +4,7 @@
 
 #include "Extensions/NRIDescriptorHeap.h"
 #include "Extensions/NRIRayTracing.h"
+#include "Extensions/NRIUpscaler.h"
 #include "Extensions/NRIWrapperMetal.h"
 
 #include <algorithm>
@@ -61,31 +62,40 @@ bool RunPipeline(test::Context& context, nri::Queue& queue, nri::PipelineLayout&
         }
     } cache{context.core};
 
-    const nri::PipelineCacheDesc emptyCache = {};
-    TEST_CHECK(context.core.CreatePipelineCache(*context.device, emptyCache, cache.object));
-    pipelineDesc.cache = cache.object;
-    if (context.deviceDesc->features.pipelineCacheControl) {
-        pipelineDesc.flags = nri::ComputePipelineBits::FAIL_ON_CACHE_MISS;
-        TEST_CHECK(context.core.CreateComputePipeline(*context.device, pipelineDesc, pipeline) == nri::Result::FAILURE && pipeline == nullptr);
-        pipelineDesc.flags = nri::ComputePipelineBits::NONE;
+    // Apple shader instrumentation is incompatible with Metal binary archives.
+    const char* shaderValidation = std::getenv("MTL_SHADER_VALIDATION");
+    const bool testCache = !shaderValidation || std::strcmp(shaderValidation, "1") != 0;
+    if (testCache) {
+        const nri::PipelineCacheDesc emptyCache = {};
+        TEST_CHECK(context.core.CreatePipelineCache(*context.device, emptyCache, cache.object));
+        pipelineDesc.cache = cache.object;
+        if (context.deviceDesc->features.pipelineCacheControl) {
+            pipelineDesc.flags = nri::ComputePipelineBits::FAIL_ON_CACHE_MISS;
+            TEST_CHECK(context.core.CreateComputePipeline(*context.device, pipelineDesc, pipeline) == nri::Result::FAILURE && pipeline == nullptr);
+            pipelineDesc.flags = nri::ComputePipelineBits::NONE;
+        }
+    } else {
+        printf("SKIP  pipeline archive round-trip with Metal shader validation\n");
     }
     TEST_CHECK(context.core.CreateComputePipeline(*context.device, pipelineDesc, pipeline));
     context.Track(pipeline);
 
-    uint64_t cacheSize = 0;
-    TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, nullptr, cacheSize));
-    TEST_CHECK(cacheSize > 0);
-    std::vector<uint8_t> cacheData(cacheSize);
-    TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, cacheData.data(), cacheSize));
-    context.core.DestroyPipelineCache(cache.object);
-    cache.object = nullptr;
-    const nri::PipelineCacheDesc savedCache = {cacheData.data(), cacheSize};
-    TEST_CHECK(context.core.CreatePipelineCache(*context.device, savedCache, cache.object));
-    pipelineDesc.cache = cache.object;
-    if (context.deviceDesc->features.pipelineCacheControl)
-        pipelineDesc.flags = nri::ComputePipelineBits::FAIL_ON_CACHE_MISS;
-    TEST_CHECK(context.core.CreateComputePipeline(*context.device, pipelineDesc, pipeline));
-    context.Track(pipeline);
+    if (testCache) {
+        uint64_t cacheSize = 0;
+        TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, nullptr, cacheSize));
+        TEST_CHECK(cacheSize > 0);
+        std::vector<uint8_t> cacheData(cacheSize);
+        TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, cacheData.data(), cacheSize));
+        context.core.DestroyPipelineCache(cache.object);
+        cache.object = nullptr;
+        const nri::PipelineCacheDesc savedCache = {cacheData.data(), cacheSize};
+        TEST_CHECK(context.core.CreatePipelineCache(*context.device, savedCache, cache.object));
+        pipelineDesc.cache = cache.object;
+        if (context.deviceDesc->features.pipelineCacheControl)
+            pipelineDesc.flags = nri::ComputePipelineBits::FAIL_ON_CACHE_MISS;
+        TEST_CHECK(context.core.CreateComputePipeline(*context.device, pipelineDesc, pipeline));
+        context.Track(pipeline);
+    }
 
     const uint64_t bufferSize = descriptorOffset + rootOffset + initialOutput.size() * sizeof(uint32_t);
     nri::BufferDesc bufferDesc = {};
@@ -697,6 +707,288 @@ bool TestResolve(test::Context& context, nri::Queue& queue, uint32_t mode) {
     return test::Report("explicit 4x MSAA resolve, per-sample colors and two layers", passed);
 }
 
+bool TestNIS(test::Context& context, nri::Queue& queue) {
+    nri::UpscalerInterface upscalerInterface = {};
+    TEST_CHECK(nri::nriGetInterface(*context.device, NRI_INTERFACE(nri::UpscalerInterface), &upscalerInterface));
+    if (!upscalerInterface.IsUpscalerSupported(*context.device, nri::UpscalerType::NIS)) {
+        printf("SKIP  NIS upscaler is unsupported\n");
+
+        return true;
+    }
+
+    constexpr uint16_t inputWidth = 13;
+    constexpr uint16_t inputHeight = 7;
+    constexpr uint16_t outputWidth = 19;
+    constexpr uint16_t outputHeight = 11;
+    constexpr uint32_t rowPitch = 256;
+    constexpr std::array<uint8_t, 4> inputColor = {51, 102, 153, 255};
+
+    nri::UpscalerDesc upscalerDesc = {};
+    upscalerDesc.upscaleResolution = {outputWidth, outputHeight};
+    upscalerDesc.type = nri::UpscalerType::NIS;
+    upscalerDesc.outputFormat = nri::Format::RGBA8_UNORM;
+    nri::Upscaler* upscaler = nullptr;
+    TEST_CHECK(upscalerInterface.CreateUpscaler(*context.device, upscalerDesc, upscaler));
+
+    struct UpscalerDestroyer {
+        const nri::UpscalerInterface& interface;
+        nri::Upscaler* upscaler;
+
+        ~UpscalerDestroyer() {
+            interface.DestroyUpscaler(upscaler);
+        }
+    } upscalerDestroyer{upscalerInterface, upscaler};
+
+    std::vector<uint8_t> inputData(inputWidth * inputHeight * 4);
+    for (size_t i = 0; i < inputData.size(); i += 4)
+        memcpy(inputData.data() + i, inputColor.data(), inputColor.size());
+
+    nri::TextureDesc textureDesc = {};
+    textureDesc.type = nri::TextureType::TEXTURE_2D;
+    textureDesc.format = nri::Format::RGBA8_UNORM;
+    textureDesc.usage = nri::TextureUsageBits::SHADER_RESOURCE;
+    textureDesc.width = inputWidth;
+    textureDesc.height = inputHeight;
+    nri::Texture* input = nullptr;
+    TEST_CHECK(context.CreateTexture(textureDesc, nri::MemoryLocation::DEVICE, input));
+    textureDesc.usage = nri::TextureUsageBits::SHADER_RESOURCE_STORAGE;
+    textureDesc.width = outputWidth;
+    textureDesc.height = outputHeight;
+    nri::Texture* output = nullptr;
+    TEST_CHECK(context.CreateTexture(textureDesc, nri::MemoryLocation::DEVICE, output));
+
+    const nri::TextureSubresourceUploadDesc inputSubresource = {inputData.data(), 1, inputWidth * 4, inputWidth * inputHeight * 4};
+    const nri::TextureUploadDesc inputUpload = {&inputSubresource, input, {nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE, nri::StageBits::COMPUTE_SHADER}, nri::PlaneBits::COLOR};
+    TEST_CHECK(context.helper.UploadData(queue, &inputUpload, 1, nullptr, 0));
+
+    nri::TextureViewDesc viewDesc = {};
+    viewDesc.texture = input;
+    viewDesc.type = nri::TextureView::TEXTURE;
+    viewDesc.format = textureDesc.format;
+    viewDesc.mipNum = 1;
+    viewDesc.layerNum = 1;
+    viewDesc.sliceNum = 1;
+    nri::Descriptor* inputView = nullptr;
+    TEST_CHECK(context.core.CreateTextureView(viewDesc, inputView));
+    context.Track(inputView);
+    viewDesc.texture = output;
+    viewDesc.type = nri::TextureView::STORAGE_TEXTURE;
+    nri::Descriptor* outputView = nullptr;
+    TEST_CHECK(context.core.CreateTextureView(viewDesc, outputView));
+    context.Track(outputView);
+
+    nri::BufferDesc readbackDesc = {};
+    readbackDesc.size = rowPitch * outputHeight;
+    nri::Buffer* readback = nullptr;
+    TEST_CHECK(context.CreateBuffer(readbackDesc, nri::MemoryLocation::HOST_READBACK, readback));
+
+    nri::CommandAllocator* allocator = nullptr;
+    nri::CommandBuffer* commands = nullptr;
+    TEST_CHECK(context.CreateCommandObjects(queue, allocator, commands));
+    TEST_CHECK(context.core.BeginCommandBuffer(*commands, nullptr));
+    nri::TextureBarrierDesc barrier = {};
+    barrier.texture = output;
+    barrier.mipNum = 1;
+    barrier.layerNum = 1;
+    barrier.after = {nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::Layout::SHADER_RESOURCE_STORAGE, nri::StageBits::COMPUTE_SHADER};
+    nri::BarrierDesc barriers = {};
+    barriers.textures = &barrier;
+    barriers.textureNum = 1;
+    context.core.CmdBarrier(*commands, barriers);
+
+    nri::DispatchUpscaleDesc dispatchDesc = {};
+    dispatchDesc.output = {output, outputView};
+    dispatchDesc.input = {input, inputView};
+    dispatchDesc.settings.nis.sharpness = 0.0f;
+    dispatchDesc.currentResolution = {inputWidth, inputHeight};
+    upscalerInterface.CmdDispatchUpscale(*commands, *upscaler, dispatchDesc);
+
+    barrier.before = barrier.after;
+    barrier.after = {nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY};
+    context.core.CmdBarrier(*commands, barriers);
+    const nri::TextureDataLayoutDesc layout = {0, rowPitch, rowPitch * outputHeight};
+    nri::TextureRegionDesc region = {};
+    region.width = outputWidth;
+    region.height = outputHeight;
+    region.depth = 1;
+    context.core.CmdReadbackTextureToBuffer(*commands, *readback, layout, *output, region);
+    TEST_CHECK(context.SubmitAndWait(queue, *commands));
+
+    const uint8_t* data = (const uint8_t*)context.core.MapBuffer(*readback, 0, nri::WHOLE_SIZE);
+    TEST_CHECK(data != nullptr);
+    bool passed = true;
+    for (uint32_t y = 0; y < outputHeight; y++) {
+        for (uint32_t x = 0; x < outputWidth; x++) {
+            for (uint32_t c = 0; c < 3; c++)
+                passed &= abs(int(data[y * rowPitch + x * 4 + c]) - int(inputColor[c])) <= 2;
+        }
+    }
+    if (!passed)
+        printf("NIS first output RGB: %u,%u,%u (expected %u,%u,%u)\n", data[0], data[1], data[2], inputColor[0], inputColor[1], inputColor[2]);
+    context.core.UnmapBuffer(*readback);
+
+    return test::Report("NIS asymmetric upscale RGB readback", passed);
+}
+
+bool TestNativeLayerBasedMultiview(test::Context& context, nri::Queue& queue) {
+    if (!context.deviceDesc->features.layerBasedMultiview || context.deviceDesc->other.viewMaxNum < 2) {
+        printf("SKIP  native Metal layer-based multiview is unsupported\n");
+
+        return true;
+    }
+
+    constexpr uint32_t width = 4;
+    constexpr uint32_t height = 3;
+    constexpr uint32_t rowPitch = 256;
+    constexpr uint32_t slicePitch = rowPitch * height;
+
+    nri::PipelineLayoutDesc layoutDesc = {};
+    layoutDesc.shaderStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
+    nri::PipelineLayout* pipelineLayout = nullptr;
+    TEST_CHECK(context.core.CreatePipelineLayout(*context.device, layoutDesc, pipelineLayout));
+    context.Track(pipelineLayout);
+
+    nri::ShaderDesc shaders[] = {
+        LoadComputeShader(context, "MetalTests.metallib", "multiviewVertex"),
+        LoadComputeShader(context, "MetalTests.metallib", "multiviewFragment"),
+    };
+    shaders[0].stage = nri::StageBits::VERTEX_SHADER;
+    shaders[1].stage = nri::StageBits::FRAGMENT_SHADER;
+
+    nri::ColorAttachmentDesc color = {};
+    color.format = nri::Format::RGBA8_UNORM;
+    color.colorWriteMask = nri::ColorWriteBits::RGBA;
+
+    const uint32_t viewMasks[] = {3, 2, 3, 2};
+    const char* names[] = {
+        "native Metal layer-based multiview readback",
+        "native Metal sparse layer-based multiview mapping",
+        "native Metal viewport-based multiview readback",
+        "native Metal flexible multiview subset mapping",
+    };
+    bool passed = true;
+    for (uint32_t caseIndex = 0; caseIndex < 4; caseIndex++) {
+        const bool viewportBased = caseIndex == 2;
+        const bool flexible = caseIndex == 3;
+        const uint16_t layerNum = viewportBased ? 1 : 2;
+        if (flexible) {
+            shaders[0] = LoadComputeShader(context, "MetalTests.metallib", "multiviewFlexibleVertex");
+            shaders[0].stage = nri::StageBits::VERTEX_SHADER;
+        }
+        nri::GraphicsPipelineDesc pipelineDesc = {};
+        pipelineDesc.pipelineLayout = pipelineLayout;
+        pipelineDesc.inputAssembly.topology = nri::Topology::TRIANGLE_LIST;
+        pipelineDesc.outputMerger.colors = &color;
+        pipelineDesc.outputMerger.colorNum = 1;
+        pipelineDesc.outputMerger.viewMask = flexible ? 3 : (viewportBased ? 0 : viewMasks[caseIndex]);
+        pipelineDesc.outputMerger.multiview = flexible ? nri::Multiview::FLEXIBLE : (viewportBased ? nri::Multiview::VIEWPORT_BASED : nri::Multiview::LAYER_BASED);
+        pipelineDesc.shaders = shaders;
+        pipelineDesc.shaderNum = 2;
+        nri::Pipeline* pipeline = nullptr;
+        TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, pipelineDesc, pipeline));
+        context.Track(pipeline);
+
+        nri::TextureDesc textureDesc = {};
+        textureDesc.type = nri::TextureType::TEXTURE_2D;
+        textureDesc.format = color.format;
+        textureDesc.usage = nri::TextureUsageBits::COLOR_ATTACHMENT;
+        textureDesc.width = width;
+        textureDesc.height = height;
+        textureDesc.layerNum = layerNum;
+        nri::Texture* texture = nullptr;
+        TEST_CHECK(context.CreateTexture(textureDesc, nri::MemoryLocation::DEVICE, texture));
+
+        nri::TextureViewDesc viewDesc = {};
+        viewDesc.texture = texture;
+        viewDesc.type = nri::TextureView::COLOR_ATTACHMENT;
+        viewDesc.format = color.format;
+        viewDesc.mipNum = 1;
+        viewDesc.layerNum = layerNum;
+        viewDesc.sliceNum = 1;
+        nri::Descriptor* view = nullptr;
+        TEST_CHECK(context.core.CreateTextureView(viewDesc, view));
+        context.Track(view);
+
+        nri::BufferDesc bufferDesc = {};
+        bufferDesc.size = slicePitch * 2;
+        nri::Buffer* readback = nullptr;
+        TEST_CHECK(context.CreateBuffer(bufferDesc, nri::MemoryLocation::HOST_READBACK, readback));
+
+        nri::CommandAllocator* allocator = nullptr;
+        nri::CommandBuffer* commands = nullptr;
+        TEST_CHECK(context.CreateCommandObjects(queue, allocator, commands));
+        TEST_CHECK(context.core.BeginCommandBuffer(*commands, nullptr));
+        nri::TextureBarrierDesc barrier = {};
+        barrier.texture = texture;
+        barrier.mipNum = 1;
+        barrier.layerNum = layerNum;
+        barrier.after = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+        nri::BarrierDesc barriers = {};
+        barriers.textures = &barrier;
+        barriers.textureNum = 1;
+        context.core.CmdBarrier(*commands, barriers);
+
+        nri::AttachmentDesc attachment = {};
+        attachment.descriptor = view;
+        attachment.loadOp = nri::LoadOp::CLEAR;
+        attachment.storeOp = nri::StoreOp::STORE;
+        nri::RenderingDesc rendering = {};
+        rendering.colors = &attachment;
+        rendering.colorNum = 1;
+        rendering.viewMask = viewMasks[caseIndex];
+        context.core.CmdBeginRendering(*commands, rendering);
+        context.core.CmdSetPipelineLayout(*commands, nri::BindPoint::GRAPHICS, *pipelineLayout);
+        context.core.CmdSetPipeline(*commands, *pipeline);
+        const nri::Viewport viewport = {0, 0, width, height, 0, 1};
+        const nri::Rect scissor = {0, 0, width, height};
+        context.core.CmdSetViewports(*commands, &viewport, 1);
+        context.core.CmdSetScissors(*commands, &scissor, 1);
+        if (viewportBased) {
+            const nri::Viewport viewports[] = {{0, 0, width / 2, height, 0, 1}, {width / 2, 0, width / 2, height, 0, 1}};
+            const nri::Rect scissors[] = {scissor, scissor};
+            context.core.CmdSetViewports(*commands, viewports, 2);
+            context.core.CmdSetScissors(*commands, scissors, 2);
+        }
+        context.core.CmdDraw(*commands, {3, 1, 0, 0});
+        context.core.CmdEndRendering(*commands);
+
+        barrier.before = barrier.after;
+        barrier.after = {nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY};
+        context.core.CmdBarrier(*commands, barriers);
+        for (uint16_t layer = 0; layer < layerNum; layer++) {
+            nri::TextureRegionDesc region = {};
+            region.layerOffset = layer;
+            region.width = width;
+            region.height = height;
+            region.depth = 1;
+            const nri::TextureDataLayoutDesc dataLayout = {uint64_t(layer) * slicePitch, rowPitch, slicePitch};
+            context.core.CmdReadbackTextureToBuffer(*commands, *readback, dataLayout, *texture, region);
+        }
+        TEST_CHECK(context.SubmitAndWait(queue, *commands));
+
+        const uint8_t* data = (const uint8_t*)context.core.MapBuffer(*readback, 0, nri::WHOLE_SIZE);
+        TEST_CHECK(data != nullptr);
+        bool casePassed = true;
+        for (uint32_t layer = 0; layer < layerNum; layer++) {
+            // A sparse mask maps packed amplification index 0 to view/layer 1.
+            const std::array<uint8_t, 4> expected = caseIndex == 1 || flexible ? (layer == 0 ? std::array<uint8_t, 4>{0, 0, 0, 0} : std::array<uint8_t, 4>{255, 0, 0, 255}) : (layer == 0 ? std::array<uint8_t, 4>{255, 0, 0, 255} : std::array<uint8_t, 4>{0, 255, 0, 255});
+            for (uint32_t y = 0; y < height; y++) {
+                for (uint32_t x = 0; x < width; x++) {
+                    const std::array<uint8_t, 4> pixel = viewportBased && x >= width / 2 ? std::array<uint8_t, 4>{0, 255, 0, 255} : expected;
+                    for (uint32_t c = 0; c < 4; c++)
+                        casePassed &= data[layer * slicePitch + y * rowPitch + x * 4 + c] == pixel[c];
+                }
+            }
+        }
+        if (!casePassed)
+            printf("Multiview first pixels: layer 0 = %u,%u,%u,%u; layer 1 = %u,%u,%u,%u\n", data[0], data[1], data[2], data[3], data[slicePitch], data[slicePitch + 1], data[slicePitch + 2], data[slicePitch + 3]);
+        context.core.UnmapBuffer(*readback);
+        passed &= test::Report(names[caseIndex], casePassed);
+    }
+
+    return passed;
+}
+
 bool TestAttachmentClears(test::Context& context, nri::Queue& queue, nri::Format format, bool reinterpretFormat = false) {
     const bool depthStencil = format == nri::Format::D32_SFLOAT_S8_UINT;
     const bool signedInteger = format == nri::Format::R32_SINT;
@@ -1271,6 +1563,8 @@ bool Run(const test::Settings& settings) {
     TEST_CHECK(clearPassed);
     for (uint32_t mode = 0; mode < 14; mode++)
         TEST_CHECK(TestResolve(context, *queue, mode));
+    TEST_CHECK(TestNIS(context, *queue));
+    TEST_CHECK(TestNativeLayerBasedMultiview(context, *queue));
     TEST_CHECK(TestAttachmentClears(context, *queue, nri::Format::R32_UINT));
     TEST_CHECK(TestAttachmentClears(context, *queue, nri::Format::R32_SINT));
     TEST_CHECK(TestAttachmentClears(context, *queue, nri::Format::R32_SINT, true));
