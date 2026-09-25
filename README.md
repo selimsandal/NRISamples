@@ -30,9 +30,9 @@ Or by running scripts only:
 ### macOS (Metal 4)
 
 - Install macOS 26 and Xcode 26 or newer, then run `xcodebuild -downloadComponent MetalToolchain`.
-- Place current Metal 4-capable metal-cpp headers at `../metal-cpp`, or set `NRI_METAL_CPP_PATH`.
-- Configure with the local framework and NRI checkouts and build:
-  `cmake -S . -B _Build -DNRI_FRAMEWORK_SOURCE_DIR_OVERRIDE=../NRIFramework -DNRI_SOURCE_DIR_OVERRIDE=../NRI -DNRI_METAL_CPP_PATH=../metal-cpp -DNRI_ENABLE_METAL_SUPPORT=ON -DNRI_ENABLE_METAL_SHADER_CONVERTER=OFF`
+- Initialize dependencies with `git submodule update --init --recursive`. CMake downloads the metal-cpp headers automatically.
+- Configure and build:
+  `cmake -S . -B _Build -DNRI_ENABLE_METAL_SUPPORT=ON -DNRI_ENABLE_METAL_SHADER_CONVERTER=OFF`
   `cmake --build _Build --config Release`
 - Run from the repository root: `_Bin/MetalTests --api=METAL --debugNRI`.
 

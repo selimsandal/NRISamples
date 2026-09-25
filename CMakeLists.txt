@@ -83,9 +83,8 @@ endif()
 # External/NRIFramework
 set(NRI_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 set(SHADERMAKE_FIND_SLANG ON)
-set(NRI_FRAMEWORK_SOURCE_DIR_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/External/NRIFramework" CACHE PATH "NRIFramework source directory")
 
-add_subdirectory("${NRI_FRAMEWORK_SOURCE_DIR_OVERRIDE}" "${CMAKE_CURRENT_BINARY_DIR}/External/NRIFramework")
+add_subdirectory("External/NRIFramework")
 
 # Move dependencies into "External"
 function(fix_folders _DIRECTORY _FOLDER)
@@ -103,7 +102,7 @@ function(fix_folders _DIRECTORY _FOLDER)
     endforeach()
 endfunction()
 
-fix_folders("${NRI_FRAMEWORK_SOURCE_DIR_OVERRIDE}" "External")
+fix_folders("External/NRIFramework" "External")
 
 # Shaders
 file(GLOB_RECURSE SHADERS "Shaders/*.hlsl" "Shaders/*.hlsli" "Shaders/*.metal")
@@ -207,7 +206,8 @@ add_sample(MemoryAliasing cpp)
 add_sample(MeshShader cpp)
 add_sample(MetalTests cpp)
 if(APPLE AND NRI_ENABLE_METAL_SUPPORT)
-    target_include_directories(MetalTests PRIVATE "${NRI_METAL_CPP_PATH}")
+    fetchcontent_getproperties(metal_cpp SOURCE_DIR METAL_CPP_SOURCE_DIR)
+    target_include_directories(MetalTests PRIVATE "${METAL_CPP_SOURCE_DIR}")
     target_compile_definitions(MetalTests PRIVATE METAL_NATIVE_TESTS=1)
     target_link_libraries(MetalTests PRIVATE "-framework Metal" "-framework Foundation")
 endif()
