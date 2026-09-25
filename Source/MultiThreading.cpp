@@ -275,7 +275,7 @@ void Sample::LatencySleep(uint32_t frameIndex) {
 void Sample::PrepareFrame(uint32_t) {
     bool multiThreadingPrev = m_MultiThreading;
 
-    if(IsHalfTimeLimitReached())
+    if (IsHalfTimeLimitReached())
         m_MultiThreading = !m_MultiThreading;
 
     ImGui::NewFrame();
@@ -400,6 +400,14 @@ void Sample::RenderFrame(uint32_t frameIndex) {
         {
             helper::Annotation annotation(NRI, commandBuffer, "Render boxes");
 
+            nri::GlobalBarrierDesc attachmentBarrier = {};
+            attachmentBarrier.before = {nri::AccessBits::COLOR_ATTACHMENT | nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE, nri::StageBits::COLOR_ATTACHMENT | nri::StageBits::DEPTH_STENCIL_ATTACHMENT};
+            attachmentBarrier.after = {nri::AccessBits::COLOR_ATTACHMENT | nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_READ | nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE, attachmentBarrier.before.stages};
+            nri::BarrierDesc barrierDesc = {};
+            barrierDesc.globals = &attachmentBarrier;
+            barrierDesc.globalNum = 1;
+            NRI.CmdBarrier(commandBuffer, barrierDesc);
+
             nri::AttachmentDesc colorAttachmentDesc = {};
             colorAttachmentDesc.descriptor = m_BackBuffer->colorAttachment;
 
@@ -449,16 +457,10 @@ void Sample::RenderFrame(uint32_t frameIndex) {
 
             const nri::ImguiRenderData imguiRenderData = CmdCopyImguiData(commandBufferPost, *m_Streamer);
 
-            NRI.CmdBeginRendering(commandBufferPost, renderingDesc);
-            {
-                CmdDrawImgui(commandBufferPost, imguiRenderData, m_BackBuffer->attachmentFormat, 1.0f, true);
-            }
-            NRI.CmdEndRendering(commandBufferPost);
-
             nri::TextureBarrierDesc swapChainTextureTransition = {};
             swapChainTextureTransition.texture = m_BackBuffer->texture;
-            swapChainTextureTransition.before = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT};
-            swapChainTextureTransition.after = {nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE};
+            swapChainTextureTransition.before = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+            swapChainTextureTransition.after = swapChainTextureTransition.before;
             swapChainTextureTransition.layerNum = 1;
             swapChainTextureTransition.mipNum = 1;
 
@@ -466,6 +468,14 @@ void Sample::RenderFrame(uint32_t frameIndex) {
             barrierDesc.textures = &swapChainTextureTransition;
             barrierDesc.textureNum = 1;
 
+            NRI.CmdBarrier(commandBufferPost, barrierDesc);
+            NRI.CmdBeginRendering(commandBufferPost, renderingDesc);
+            {
+                CmdDrawImgui(commandBufferPost, imguiRenderData, m_BackBuffer->attachmentFormat, 1.0f, true);
+            }
+            NRI.CmdEndRendering(commandBufferPost);
+
+            swapChainTextureTransition.after = {nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE};
             NRI.CmdBarrier(commandBufferPost, barrierDesc);
         }
         NRI.EndCommandBuffer(commandBufferPost);
@@ -588,6 +598,14 @@ void Sample::ThreadEntryPoint(uint32_t threadIndex) {
         // Record
         NRI.BeginCommandBuffer(commandBuffer, m_DescriptorPool);
         {
+            nri::GlobalBarrierDesc attachmentBarrier = {};
+            attachmentBarrier.before = {nri::AccessBits::COLOR_ATTACHMENT | nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE, nri::StageBits::COLOR_ATTACHMENT | nri::StageBits::DEPTH_STENCIL_ATTACHMENT};
+            attachmentBarrier.after = {nri::AccessBits::COLOR_ATTACHMENT | nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_READ | nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE, attachmentBarrier.before.stages};
+            nri::BarrierDesc barrierDesc = {};
+            barrierDesc.globals = &attachmentBarrier;
+            barrierDesc.globalNum = 1;
+            NRI.CmdBarrier(commandBuffer, barrierDesc);
+
             nri::AttachmentDesc colorAttachmentDesc = {};
             colorAttachmentDesc.descriptor = m_BackBuffer->colorAttachment;
 

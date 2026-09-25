@@ -83,8 +83,9 @@ endif()
 # External/NRIFramework
 set(NRI_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 set(SHADERMAKE_FIND_SLANG ON)
+set(NRI_FRAMEWORK_SOURCE_DIR_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/External/NRIFramework" CACHE PATH "NRIFramework source directory")
 
-add_subdirectory("External/NRIFramework")
+add_subdirectory("${NRI_FRAMEWORK_SOURCE_DIR_OVERRIDE}" "${CMAKE_CURRENT_BINARY_DIR}/External/NRIFramework")
 
 # Move dependencies into "External"
 function(fix_folders _DIRECTORY _FOLDER)
@@ -102,10 +103,10 @@ function(fix_folders _DIRECTORY _FOLDER)
     endforeach()
 endfunction()
 
-fix_folders("External/NRIFramework" "External")
+fix_folders("${NRI_FRAMEWORK_SOURCE_DIR_OVERRIDE}" "External")
 
 # Shaders
-file(GLOB_RECURSE SHADERS "Shaders/*.hlsl" "Shaders/*.hlsli")
+file(GLOB_RECURSE SHADERS "Shaders/*.hlsl" "Shaders/*.hlsli" "Shaders/*.metal")
 set_source_files_properties(${SHADERS} PROPERTIES VS_TOOL_OVERRIDE "None")
 
 get_target_property(ML_SOURCE_DIR MathLib SOURCE_DIR)
@@ -118,7 +119,6 @@ set(SHADERMAKE_GENERAL_ARGS
     --flatten
     --stripReflection
     --WX
-    --sRegShift 0 --bRegShift 32 --uRegShift 64 --tRegShift 128 # TODO: must be in sync with "VK_BINDING_OFFSETS"
     --sourceDir "Shaders"
     --ignoreConfigDir
     --vulkanVersion 1.2 # only for WGPU
@@ -135,12 +135,12 @@ if(NRI_ENABLE_D3D11_SUPPORT)
     set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p DXBC --compiler "${SHADERMAKE_FXC_PATH}" ${SHADERMAKE_GENERAL_ARGS})
 endif()
 
-if(NRI_ENABLE_D3D12_SUPPORT)
+if(NRI_ENABLE_D3D12_SUPPORT OR NRI_ENABLE_METAL_SHADER_CONVERTER)
     set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p DXIL --compiler "${SHADERMAKE_DXC_PATH}" ${SHADERMAKE_GENERAL_ARGS})
 endif()
 
 if(NRI_ENABLE_VK_SUPPORT)
-    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p SPIRV --compiler "${SHADERMAKE_DXC_VK_PATH}" ${SHADERMAKE_GENERAL_ARGS} --compilerAlias "SLANG=${SHADERMAKE_SLANG_PATH}")
+    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p SPIRV --compiler "${SHADERMAKE_DXC_VK_PATH}" ${SHADERMAKE_GENERAL_ARGS} --sRegShift 0 --bRegShift 32 --uRegShift 64 --tRegShift 128 --compilerAlias "SLANG=${SHADERMAKE_SLANG_PATH}")
 endif()
 
 add_custom_target(${PROJECT_NAME}Shaders ALL
@@ -150,6 +150,22 @@ add_custom_target(${PROJECT_NAME}Shaders ALL
     VERBATIM
     SOURCES ${SHADERS}
 )
+
+if(APPLE AND NRI_ENABLE_METAL_SUPPORT)
+    find_program(NRISAMPLES_XCRUN xcrun REQUIRED)
+    set(METAL_TESTS_AIR "${CMAKE_CURRENT_BINARY_DIR}/MetalTests.air")
+    set(METAL_TESTS_LIBRARY "${SHADER_OUTPUT_PATH}/MetalTests.metallib")
+    add_custom_command(
+        OUTPUT "${METAL_TESTS_LIBRARY}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_OUTPUT_PATH}"
+        COMMAND "${NRISAMPLES_XCRUN}" -sdk macosx metal -I "${NRI_SOURCE_DIR}/Include" -c "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/MetalTests.metal" -o "${METAL_TESTS_AIR}"
+        COMMAND "${NRISAMPLES_XCRUN}" -sdk macosx metallib "${METAL_TESTS_AIR}" -o "${METAL_TESTS_LIBRARY}"
+        DEPENDS "Shaders/MetalTests.metal" "${NRI_SOURCE_DIR}/Include/NRI.metal"
+        VERBATIM
+    )
+    add_custom_target(MetalTestsMetallib DEPENDS "${METAL_TESTS_LIBRARY}")
+    add_dependencies(${PROJECT_NAME}Shaders MetalTestsMetallib)
+endif()
 
 set_target_properties(${PROJECT_NAME}Shaders PROPERTIES FOLDER ${PROJECT_NAME})
 
@@ -189,6 +205,12 @@ add_sample(IndirectCommands cpp)
 add_sample(LowLatency cpp)
 add_sample(MemoryAliasing cpp)
 add_sample(MeshShader cpp)
+add_sample(MetalTests cpp)
+if(APPLE AND NRI_ENABLE_METAL_SUPPORT)
+    target_include_directories(MetalTests PRIVATE "${NRI_METAL_CPP_PATH}")
+    target_compile_definitions(MetalTests PRIVATE METAL_NATIVE_TESTS=1)
+    target_link_libraries(MetalTests PRIVATE "-framework Metal" "-framework Foundation")
+endif()
 add_sample(Multisample cpp)
 add_sample(MultiThreading cpp)
 add_sample(Multiview cpp)

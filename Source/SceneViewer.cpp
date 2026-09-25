@@ -847,6 +847,10 @@ void Sample::RenderFrame(uint32_t frameIndex) {
 
             const nri::ImguiRenderData imguiRenderData = CmdCopyImguiData(commandBuffer, *m_Streamer);
 
+            textureBarriers.before = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+            textureBarriers.after = textureBarriers.before;
+            NRI.CmdBarrier(commandBuffer, barrierDesc);
+
             NRI.CmdBeginRendering(commandBuffer, renderingDesc);
             {
                 CmdDrawImgui(commandBuffer, imguiRenderData, swapChainTexture.attachmentFormat, 1.0f, true);

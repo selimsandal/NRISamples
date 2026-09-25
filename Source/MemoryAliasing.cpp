@@ -6,10 +6,10 @@
 
 namespace {
 
-bool RecordCopy(test::Context& context, nri::Queue& queue, nri::CommandAllocator& commandAllocator, nri::CommandBuffer& commandBuffer, nri::Buffer& upload, nri::Buffer& aliased, nri::Buffer& readback) {
+bool RecordCopy(test::Context& context, nri::Queue& queue, nri::CommandAllocator& commandAllocator, nri::CommandBuffer& commandBuffer, nri::Buffer& upload, nri::Buffer& writeAlias, nri::Buffer& readAlias, nri::Buffer& readback) {
     context.core.ResetCommandAllocator(commandAllocator);
     TEST_CHECK(context.core.BeginCommandBuffer(commandBuffer, nullptr));
-    context.core.CmdCopyBuffer(commandBuffer, aliased, 0, upload, 0, nri::WHOLE_SIZE);
+    context.core.CmdCopyBuffer(commandBuffer, writeAlias, 0, upload, 0, nri::WHOLE_SIZE);
 
     nri::GlobalBarrierDesc aliasingBarrier = {};
     aliasingBarrier.before = {nri::AccessBits::COPY_DESTINATION, nri::StageBits::COPY};
@@ -18,7 +18,7 @@ bool RecordCopy(test::Context& context, nri::Queue& queue, nri::CommandAllocator
     barrierDesc.globals = &aliasingBarrier;
     barrierDesc.globalNum = 1;
     context.core.CmdBarrier(commandBuffer, barrierDesc);
-    context.core.CmdCopyBuffer(commandBuffer, readback, 0, aliased, 0, nri::WHOLE_SIZE);
+    context.core.CmdCopyBuffer(commandBuffer, readback, 0, readAlias, 0, nri::WHOLE_SIZE);
     TEST_CHECK(context.SubmitAndWait(queue, commandBuffer));
 
     return true;
@@ -100,10 +100,10 @@ bool Run(const test::Settings& settings) {
     nri::CommandBuffer* commandBuffer = nullptr;
     TEST_CHECK(context.CreateCommandObjects(*queue, commandAllocator, commandBuffer));
 
-    TEST_CHECK(RecordCopy(context, *queue, *commandAllocator, *commandBuffer, *uploadA, *aliasedA, *readbackA));
+    TEST_CHECK(RecordCopy(context, *queue, *commandAllocator, *commandBuffer, *uploadA, *aliasedA, *aliasedB, *readbackA));
     bool passed = test::VerifyBytes(context.core, *readbackA, dataA.data(), dataSize);
 
-    TEST_CHECK(RecordCopy(context, *queue, *commandAllocator, *commandBuffer, *uploadB, *aliasedB, *readbackB));
+    TEST_CHECK(RecordCopy(context, *queue, *commandAllocator, *commandBuffer, *uploadB, *aliasedB, *aliasedA, *readbackB));
     passed &= test::VerifyBytes(context.core, *readbackB, dataB.data(), dataSize);
 
     return test::Report("overlapping placed resources", passed);

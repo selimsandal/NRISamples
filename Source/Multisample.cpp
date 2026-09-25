@@ -294,7 +294,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
         outputMergerDesc.colorNum = 1;
 
         nri::ShaderDesc shaderStages[] = {
-            utils::LoadShader(deviceDesc.graphicsAPI, "TriangleFlexibleMultiview.vs", shaderCodeStorage),
+            utils::LoadShader(deviceDesc.graphicsAPI, "Triangle.vs", shaderCodeStorage),
             utils::LoadShader(deviceDesc.graphicsAPI, "Triangle.fs", shaderCodeStorage),
         };
 

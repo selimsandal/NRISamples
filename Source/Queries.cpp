@@ -111,7 +111,7 @@ bool Run(const test::Settings& settings) {
     bool passed = true;
     if (timestampReadback) {
         const uint64_t* timestamps = (const uint64_t*)context.core.MapBuffer(*timestampReadback, 0, nri::WHOLE_SIZE);
-        passed &= timestamps && timestamps[1] >= timestamps[0];
+        passed &= timestamps && timestamps[0] != 0 && timestamps[1] >= timestamps[0];
         context.core.UnmapBuffer(*timestampReadback);
     } else
         printf("SKIP  Graphics timestamps are unsupported\n");

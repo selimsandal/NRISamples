@@ -12,6 +12,52 @@ bool CreatePipeline(test::Context& context, const nri::GraphicsPipelineDesc& des
     return true;
 }
 
+bool CreateCachedPipeline(test::Context& context, nri::GraphicsPipelineDesc desc, nri::Pipeline*& pipeline) {
+    struct Cache {
+        const nri::CoreInterface& core;
+        nri::PipelineCache* object = nullptr;
+
+        ~Cache() {
+            core.DestroyPipelineCache(object);
+        }
+    } cache{context.core};
+
+    if (context.deviceDesc->features.pipelineCache) {
+        const nri::PipelineCacheDesc empty = {};
+        TEST_CHECK(context.core.CreatePipelineCache(*context.device, empty, cache.object));
+        desc.cache = cache.object;
+
+        if (context.deviceDesc->features.pipelineCacheControl) {
+            desc.flags = nri::GraphicsPipelineBits::FAIL_ON_CACHE_MISS;
+            TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, desc, pipeline) != nri::Result::SUCCESS && pipeline == nullptr);
+            desc.flags = nri::GraphicsPipelineBits::NONE;
+        }
+    }
+
+    TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, desc, pipeline));
+    context.Track(pipeline);
+
+    if (cache.object) {
+        uint64_t size = 0;
+        TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, nullptr, size));
+        std::vector<uint8_t> bytes(size);
+        TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, bytes.data(), size));
+        context.core.DestroyPipelineCache(cache.object);
+        cache.object = nullptr;
+        const nri::PipelineCacheDesc saved = {bytes.data(), size};
+        TEST_CHECK(context.core.CreatePipelineCache(*context.device, saved, cache.object));
+        desc.cache = cache.object;
+
+        if (context.deviceDesc->features.pipelineCacheControl)
+            desc.flags = nri::GraphicsPipelineBits::FAIL_ON_CACHE_MISS;
+
+        TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, desc, pipeline));
+        context.Track(pipeline);
+    }
+
+    return true;
+}
+
 bool Run(const test::Settings& settings) {
     test::Context context;
     if (!context.Initialize(settings) || context.skipped)
@@ -60,8 +106,15 @@ bool Run(const test::Settings& settings) {
     outputMerger.stencil.front = {nri::CompareOp::ALWAYS, nri::StencilOp::KEEP, nri::StencilOp::REPLACE, nri::StencilOp::KEEP, 0xFF, 0xFF};
     outputMerger.stencil.back = outputMerger.stencil.front;
 
+    const nri::VertexStreamDesc stream = {0, nri::VertexStreamStepRate::PER_VERTEX, 16};
+    nri::VertexAttributeDesc attribute = {};
+    attribute.format = nri::Format::RG32_SFLOAT;
+    attribute.offset = 4;
+    attribute.d3d = {"POSITION", 0};
+    const nri::VertexInputDesc vertexInput = {&attribute, 1, &stream, 1};
     nri::GraphicsPipelineDesc graphicsPipelineDesc = {};
     graphicsPipelineDesc.pipelineLayout = pipelineLayout;
+    graphicsPipelineDesc.vertexInput = &vertexInput;
     graphicsPipelineDesc.inputAssembly.topology = nri::Topology::TRIANGLE_LIST;
     graphicsPipelineDesc.rasterization.fillMode = nri::FillMode::SOLID;
     graphicsPipelineDesc.rasterization.cullMode = nri::CullMode::NONE;
@@ -96,6 +149,9 @@ bool Run(const test::Settings& settings) {
         TEST_CHECK(CreatePipeline(context, linePipelineDesc));
     }
 
+    nri::Pipeline* geometryPipeline = nullptr;
+    nri::Pipeline* tessellationPipeline = nullptr;
+    nri::Pipeline* combinedPipeline = nullptr;
     if (context.deviceDesc->features.geometryShader) {
         const nri::ShaderDesc geometryShaders[] = {
             shaders[0],
@@ -105,6 +161,8 @@ bool Run(const test::Settings& settings) {
         nri::GraphicsPipelineDesc geometryPipelineDesc = graphicsPipelineDesc;
         geometryPipelineDesc.shaders = geometryShaders;
         geometryPipelineDesc.shaderNum = 3;
+        TEST_CHECK(CreateCachedPipeline(context, geometryPipelineDesc, geometryPipeline));
+        geometryPipelineDesc.shaderNum = 2;
         TEST_CHECK(CreatePipeline(context, geometryPipelineDesc));
     }
 
@@ -120,7 +178,22 @@ bool Run(const test::Settings& settings) {
         tessellationPipelineDesc.inputAssembly.tessControlPointNum = 3;
         tessellationPipelineDesc.shaders = tessellationShaders;
         tessellationPipelineDesc.shaderNum = 4;
+        TEST_CHECK(CreateCachedPipeline(context, tessellationPipelineDesc, tessellationPipeline));
+        tessellationPipelineDesc.shaderNum = 3;
         TEST_CHECK(CreatePipeline(context, tessellationPipelineDesc));
+
+        if (context.deviceDesc->features.geometryShader) {
+            const nri::ShaderDesc combinedShaders[] = {
+                tessellationShaders[0],
+                tessellationShaders[1],
+                tessellationShaders[2],
+                utils::LoadShader(graphicsAPI, "GraphicsPipelineStates.gs", context.shaderStorage),
+                shaders[1],
+            };
+            tessellationPipelineDesc.shaders = combinedShaders;
+            tessellationPipelineDesc.shaderNum = 5;
+            TEST_CHECK(CreateCachedPipeline(context, tessellationPipelineDesc, combinedPipeline));
+        }
     }
 
     nri::TextureDesc colorTextureDesc = {};
@@ -159,6 +232,46 @@ bool Run(const test::Settings& settings) {
 
     nri::CommandAllocator* commandAllocator = nullptr;
     nri::CommandBuffer* commandBuffer = nullptr;
+    nri::BufferDesc readbackDesc = {};
+    readbackDesc.size = 256 * 64;
+    nri::Buffer* readback = nullptr;
+    TEST_CHECK(context.CreateBuffer(readbackDesc, nri::MemoryLocation::HOST_READBACK, readback));
+    nri::BufferDesc argumentDesc = {};
+    argumentDesc.size = 256;
+    argumentDesc.usage = nri::BufferUsageBits::ARGUMENT | nri::BufferUsageBits::INDEX;
+    nri::Buffer* arguments = nullptr;
+    TEST_CHECK(context.CreateBuffer(argumentDesc, nri::MemoryLocation::HOST_UPLOAD, arguments));
+    uint8_t* argumentData = (uint8_t*)context.core.MapBuffer(*arguments, 0, argumentDesc.size);
+    TEST_CHECK(argumentData != nullptr);
+    memset(argumentData, 0, argumentDesc.size);
+    const nri::DrawDesc draw = {3, 1, 3, 7};
+    const nri::DrawIndexedDesc indexedDraw = {3, 1, 1, -3, 7};
+    const uint16_t indices[] = {65535, 65535, 6, 7, 8};
+    const uint32_t count = 1;
+    memcpy(argumentData + 16, &draw, sizeof(draw));
+    memcpy(argumentData + 96, &indexedDraw, sizeof(indexedDraw));
+    memcpy(argumentData + 128, &indexedDraw, sizeof(indexedDraw));
+    memcpy(argumentData + 192, indices, sizeof(indices));
+    memcpy(argumentData + 224, &count, sizeof(count));
+    context.core.UnmapBuffer(*arguments);
+    const float vertexData[][4] = {
+        {99, 10, 10, 99}, // Buffer prefix, excluded by the bound offset.
+        {99, 10, 10, 99},
+        {99, 10, 10, 99},
+        {99, 10, 10, 99}, // Guard vertices.
+        {99, -0.75f, 0.75f, 99},
+        {99, 0.75f, 0.75f, 99},
+        {99, 0.0f, -0.75f, 99},
+    };
+    nri::BufferDesc vertexDesc = {};
+    vertexDesc.size = sizeof(vertexData);
+    vertexDesc.usage = nri::BufferUsageBits::VERTEX;
+    nri::Buffer* vertices = nullptr;
+    TEST_CHECK(context.CreateBuffer(vertexDesc, nri::MemoryLocation::HOST_UPLOAD, vertices));
+    void* vertexMapping = context.core.MapBuffer(*vertices, 0, vertexDesc.size);
+    TEST_CHECK(vertexMapping != nullptr);
+    memcpy(vertexMapping, vertexData, sizeof(vertexData));
+    context.core.UnmapBuffer(*vertices);
     TEST_CHECK(context.CreateCommandObjects(*queue, commandAllocator, commandBuffer));
     TEST_CHECK(context.core.BeginCommandBuffer(*commandBuffer, nullptr));
 
@@ -208,11 +321,65 @@ bool Run(const test::Settings& settings) {
         const nri::DepthBiasDesc depthBias = {1.0f, 0.0f, 1.0f};
         context.core.CmdSetDepthBias(*commandBuffer, depthBias);
     }
-    context.core.CmdDraw(*commandBuffer, {3, 1, 0, 0});
+    nri::Pipeline* drawPipelines[] = {pipeline, geometryPipeline, tessellationPipeline, combinedPipeline};
+    for (uint32_t i = 0; i < 4; i++) {
+        if (!drawPipelines[i])
+            continue;
+
+        context.core.CmdSetPipeline(*commandBuffer, *drawPipelines[i]);
+        const nri::VertexBufferDesc vertexBuffer = {vertices, 16, context.deviceDesc->features.extendedDynamicState ? 16u : 0u};
+        context.core.CmdSetVertexBuffers(*commandBuffer, 0, &vertexBuffer, 1);
+        context.core.CmdSetIndexBuffer(*commandBuffer, *arguments, 194, nri::IndexType::UINT16);
+        for (uint32_t mode = 0; mode < 4; mode++) {
+            const nri::Viewport drawViewport = {float(i * 16), float(mode * 16), 16.0f, 16.0f, 0.0f, 1.0f};
+            context.core.CmdSetViewports(*commandBuffer, &drawViewport, 1);
+            if (mode == 0)
+                context.core.CmdDraw(*commandBuffer, draw);
+            else if (mode == 1)
+                context.core.CmdDrawIndexed(*commandBuffer, indexedDraw);
+            else if (mode == 2)
+                context.core.CmdDrawIndirect(*commandBuffer, *arguments, 16, 2, 32, nullptr, 0);
+            else
+                context.core.CmdDrawIndexedIndirect(*commandBuffer, *arguments, 96, context.deviceDesc->features.drawIndirectCount ? 2 : 1, 32, context.deviceDesc->features.drawIndirectCount ? arguments : nullptr, 224);
+        }
+    }
     context.core.CmdEndRendering(*commandBuffer);
+    textureBarriers[0].before = textureBarriers[0].after;
+    textureBarriers[0].after = {nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY};
+    barrierDesc.textureNum = 1;
+    context.core.CmdBarrier(*commandBuffer, barrierDesc);
+    nri::TextureDataLayoutDesc readbackLayout = {};
+    readbackLayout.rowPitch = 256;
+    readbackLayout.slicePitch = 256 * 64;
+    nri::TextureRegionDesc region = {};
+    region.width = 64;
+    region.height = 64;
+    region.depth = 1;
+    context.core.CmdReadbackTextureToBuffer(*commandBuffer, *readback, readbackLayout, *colorTexture, region);
     TEST_CHECK(context.SubmitAndWait(*queue, *commandBuffer));
 
-    return test::Report("graphics pipeline states", true);
+    const uint8_t* pixels = (const uint8_t*)context.core.MapBuffer(*readback, 0, readbackDesc.size);
+    if (!pixels)
+        return false;
+
+    bool passed = true;
+    const char* names[] = {"vertex", "geometry", "tessellation", "tessellation + geometry"};
+    for (uint32_t i = 0; i < 4; i++) {
+        if (!drawPipelines[i])
+            continue;
+
+        for (uint32_t mode = 0; mode < 4; mode++) {
+            const uint8_t* center = pixels + (mode * 16 + 8) * 256 + (i * 16 + 8) * 4;
+            // Fragment (0.8, 0.3, 0.1) multiplied by blend constants (0.25, 0.5, 0.75).
+            const bool matches = abs(int(center[0]) - 51) <= 1 && abs(int(center[1]) - 38) <= 1 && abs(int(center[2]) - 19) <= 1 && center[3] == 255;
+            printf("%s mode %u center: %u %u %u %u\n", names[i], mode, center[0], center[1], center[2], center[3]);
+            passed &= test::Report(names[i], matches);
+        }
+    }
+    passed &= pixels[0] == 0 && pixels[1] == 0 && pixels[2] == 0 && pixels[3] == 0;
+    context.core.UnmapBuffer(*readback);
+
+    return test::Report("graphics pipeline states", passed);
 }
 
 } // namespace

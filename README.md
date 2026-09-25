@@ -27,6 +27,19 @@ Or by running scripts only:
 - Run `./1-Deploy.sh`
 - RUn `./2-Build.sh`
 
+### macOS (Metal 4)
+
+- Install macOS 26 and Xcode 26 or newer, then run `xcodebuild -downloadComponent MetalToolchain`.
+- Place current Metal 4-capable metal-cpp headers at `../metal-cpp`, or set `NRI_METAL_CPP_PATH`.
+- Configure with the local framework and NRI checkouts and build:
+  `cmake -S . -B _Build -DNRI_FRAMEWORK_SOURCE_DIR_OVERRIDE=../NRIFramework -DNRI_SOURCE_DIR_OVERRIDE=../NRI -DNRI_METAL_CPP_PATH=../metal-cpp -DNRI_ENABLE_METAL_SUPPORT=ON -DNRI_ENABLE_METAL_SHADER_CONVERTER=OFF`
+  `cmake --build _Build --config Release`
+- Run from the repository root: `_Bin/MetalTests --api=METAL --debugNRI`.
+
+The converter-free build compiles `MetalTests.metal` with `xcrun metal` and `xcrun metallib`; build and run the `MetalTests` target to exercise the native path. To run HLSL samples such as `_Bin/Triangle`, install Metal Shader Converter 4.0.1 and DXC, then configure with `NRI_ENABLE_METAL_SHADER_CONVERTER=ON`. Existing HLSL shaders compile to DXIL without Vulkan register shifts and are converted by the backend. NRI's README lists dependency paths and hardware requirements; `Include/NRI.metal` describes the native shader ABI.
+
+Metal-enabled macOS builds select Metal by default; `--api` overrides it. Window dimensions are render pixels, while macOS window sizes use logical points. On a 2x Retina display, the default 1920x1080 output uses a decorated 960x540-point content area. Triangle's multiview control is disabled because Metal Shader Converter does not support `SV_ViewID`.
+
 ### CMake options
 
 - `DISABLE_SHADER_COMPILATION` - disable compilation of shaders (shaders can be built on other platform)
@@ -70,4 +83,3 @@ The executables from `_Bin` directory load resources from `_Data`, therefore the
 - TextureTypes - 1D, 2D array, cube and 3D texture/view testing
 - Triangle - simple textured triangle rendering (also multiview demonstration in _FLEXIBLE_ mode)
 - Wrapper - shows how to wrap native D3D11/D3D12/VK objects into *NRI* entities
-

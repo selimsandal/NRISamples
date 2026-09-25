@@ -332,7 +332,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
         outputMergerDesc.colorNum = 1;
 
         nri::ShaderDesc shaderStages[] = {
-            utils::LoadShader(deviceDesc.graphicsAPI, "TriangleFlexibleMultiview.vs", shaderCodeStorage),
+            utils::LoadShader(deviceDesc.graphicsAPI, deviceDesc.features.flexibleMultiview ? "TriangleFlexibleMultiview.vs" : "Triangle.vs", shaderCodeStorage),
             utils::LoadShader(deviceDesc.graphicsAPI, "Triangle.fs", shaderCodeStorage),
         };
 
@@ -515,8 +515,11 @@ void Sample::PrepareFrame(uint32_t) {
             ImGui::SliderFloat("Scale", &m_Scale, 0.5f, 50.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 
             ImGui::BeginDisabled(!deviceDesc.features.flexibleMultiview);
-            ImGui::Checkbox("Multiview", &m_Multiview);
+            ImGui::Checkbox(deviceDesc.features.flexibleMultiview ? "Multiview" : "Multiview (unsupported)", &m_Multiview);
             ImGui::EndDisabled();
+
+            if (!deviceDesc.features.flexibleMultiview && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(deviceDesc.graphicsAPI == nri::GraphicsAPI::METAL ? "Metal Shader Converter does not support SV_ViewID." : "The selected device does not support flexible multiview.");
         }
         ImGui::End();
     }
@@ -674,6 +677,11 @@ void Sample::RenderFrame(uint32_t frameIndex) {
         renderingDesc.viewMask = 0;
 
         const nri::ImguiRenderData imguiRenderData = CmdCopyImguiData(*commandBuffer, *m_Streamer);
+
+        // Order scene attachment writes before the UI load and blending.
+        textureBarriers.before = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+        textureBarriers.after = textureBarriers.before;
+        NRI.CmdBarrier(*commandBuffer, barrierDesc);
 
         NRI.CmdBeginRendering(*commandBuffer, renderingDesc);
         {
