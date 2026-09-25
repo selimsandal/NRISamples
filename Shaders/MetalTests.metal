@@ -87,6 +87,15 @@ kernel void readDepthStencil(constant DepthStencilRoot& root [[buffer(2)]], uint
 
 // Native ray dispatch fixture: both records use one signature, with different
 // results so an ignored SBT record or incorrect indirect grid is observable.
+struct NativeScene {
+    raytracing::instance_acceleration_structure accelerationStructure;
+    constant uint* instanceContributions;
+    ulong reserved[6];
+};
+
+static_assert(sizeof(NativeScene) == 64);
+static_assert(__builtin_offsetof(NativeScene, instanceContributions) == 8);
+
 using NativeRaygen = void(constant Root&, uint3, uint3);
 struct NativeRayArguments {
     NriRayDispatchDesc dispatch;
@@ -98,9 +107,9 @@ struct NativeRayArguments {
     ulong intersectionTables;
 };
 
-static_assert(sizeof(NriShaderIdentifier) == 32);
-static_assert(sizeof(NriRayDispatchDesc) == 104);
 static_assert(sizeof(NativeRayArguments) == sizeof(NriRayDispatchArguments));
+static_assert(__builtin_offsetof(NativeRayArguments, visibleFunctions) == __builtin_offsetof(NriRayDispatchArguments, visibleFunctions));
+static_assert(__builtin_offsetof(NativeRayArguments, intersectionFunctions) == __builtin_offsetof(NriRayDispatchArguments, intersectionFunctions));
 
 [[visible]] void nativeRaygen(constant Root& root, uint3 position, uint3 size) {
     uint index = (position.z * size.y + position.y) * size.x + position.x;

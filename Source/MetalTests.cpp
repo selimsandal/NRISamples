@@ -95,6 +95,14 @@ bool RunPipeline(test::Context& context, nri::Queue& queue, nri::PipelineLayout&
             pipelineDesc.flags = nri::ComputePipelineBits::FAIL_ON_CACHE_MISS;
         TEST_CHECK(context.core.CreateComputePipeline(*context.device, pipelineDesc, pipeline));
         context.Track(pipeline);
+
+        // Saving a loaded archive must preserve its backing data, including repeated size/data queries.
+        for (uint32_t i = 0; i < 2; i++) {
+            TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, nullptr, cacheSize));
+            TEST_CHECK(cacheSize > 0);
+            cacheData.resize(cacheSize);
+            TEST_CHECK(context.core.GetPipelineCacheData(*cache.object, cacheData.data(), cacheSize));
+        }
     }
 
     const uint64_t bufferSize = descriptorOffset + rootOffset + initialOutput.size() * sizeof(uint32_t);
@@ -885,6 +893,17 @@ bool TestNativeLayerBasedMultiview(test::Context& context, nri::Queue& queue) {
         pipelineDesc.shaders = shaders;
         pipelineDesc.shaderNum = 2;
         nri::Pipeline* pipeline = nullptr;
+        if (flexible) {
+            TEST_CHECK(context.deviceDesc->features.flexibleMultiview);
+            if (context.deviceDesc->features.shaderBytecodeDXIL) {
+                nri::ShaderDesc convertedShaders[] = {LoadComputeShader(context, "TriangleFlexibleMultiview.vs.dxil"), shaders[1]};
+                convertedShaders[0].stage = nri::StageBits::VERTEX_SHADER;
+                TEST_CHECK(convertedShaders[0].bytecode != nullptr);
+                nri::GraphicsPipelineDesc convertedDesc = pipelineDesc;
+                convertedDesc.shaders = convertedShaders;
+                TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, convertedDesc, pipeline) == nri::Result::UNSUPPORTED && pipeline == nullptr);
+            }
+        }
         TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, pipelineDesc, pipeline));
         context.Track(pipeline);
 
@@ -1255,6 +1274,15 @@ bool TestNativeRayDispatch(test::Context& context, nri::Queue& queue) {
     pipelineDesc.recursionMaxDepth = 1;
     pipelineDesc.flags = nri::RayTracingPipelineBits::SKIP_TRIANGLES | nri::RayTracingPipelineBits::SKIP_AABBS;
     nri::Pipeline* pipeline = nullptr;
+    if (context.deviceDesc->features.shaderBytecodeDXIL) {
+        nri::ShaderDesc mixedShaders[] = {shaders[0], LoadComputeShader(context, "RayTracingTriangle.rgen.dxil")};
+        mixedShaders[1].stage = nri::StageBits::RAYGEN_SHADER;
+        TEST_CHECK(mixedShaders[1].bytecode != nullptr);
+        const nri::ShaderLibraryDesc mixedLibrary = {mixedShaders, 2};
+        nri::RayTracingPipelineDesc mixedDesc = pipelineDesc;
+        mixedDesc.shaderLibrary = &mixedLibrary;
+        TEST_CHECK(ray.CreateRayTracingPipeline(*context.device, mixedDesc, pipeline) == nri::Result::UNSUPPORTED && pipeline == nullptr);
+    }
     TEST_CHECK(ray.CreateRayTracingPipeline(*context.device, pipelineDesc, pipeline));
     context.Track(pipeline);
 
