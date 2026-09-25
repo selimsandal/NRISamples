@@ -149,7 +149,8 @@ bool Run(const test::Settings& settings) {
     context.core.UpdateDescriptorRanges(&recycledUpdate, 1);
 
     // Allocate, update, copy and bind variable-sized descriptor arrays
-    if (context.deviceDesc->tiers.bindless != 0 && context.deviceDesc->tiers.resourceBinding == 2) {
+    const bool variableSupported = context.deviceDesc->tiers.bindless != 0 && context.deviceDesc->tiers.resourceBinding == 2;
+    for (uint32_t variableFirst = 0; variableSupported && variableFirst < 2; variableFirst++) {
         nri::DescriptorRangeDesc variableRangeDesc = {};
         variableRangeDesc.descriptorNum = 3;
         variableRangeDesc.descriptorType = nri::DescriptorType::CONSTANT_BUFFER;
@@ -161,7 +162,7 @@ bool Run(const test::Settings& settings) {
         fixedRangeDesc.flags = nri::DescriptorRangeBits::NONE;
         variableRangeDesc.baseRegisterIndex = 1;
 
-        const nri::DescriptorRangeDesc variableRangeDescs[] = {fixedRangeDesc, variableRangeDesc};
+        const nri::DescriptorRangeDesc variableRangeDescs[] = {variableFirst ? variableRangeDesc : fixedRangeDesc, variableFirst ? fixedRangeDesc : variableRangeDesc};
 
         nri::DescriptorSetDesc variableSetDescs[2] = {};
         variableSetDescs[0].ranges = variableRangeDescs;
