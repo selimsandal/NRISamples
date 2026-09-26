@@ -47,7 +47,7 @@ nri::ShaderDesc LoadComputeShader(test::Context& context, const char* fileName, 
     return shader;
 }
 
-bool RunPipeline(test::Context& context, nri::Queue& queue, nri::PipelineLayout& pipelineLayout, const nri::ShaderDesc& shader, const char* name, const std::vector<uint32_t>& inputData, const std::vector<uint32_t>& initialOutput, uint64_t descriptorOffset, uint32_t rootOffset, const Constants& constants, std::vector<uint32_t>& result, bool useHeap = false) {
+bool RunPipeline(test::Context& context, nri::Queue& queue, nri::PipelineLayout& pipelineLayout, const nri::ShaderDesc& shader, const char* name, const std::vector<uint32_t>& inputData, const std::vector<uint32_t>& initialOutput, uint64_t descriptorOffset, uint32_t rootOffset, const Constants& constants, std::vector<uint32_t>& result, bool useHeap = false, bool useMutable = false) {
     nri::ComputePipelineDesc pipelineDesc = {};
     pipelineDesc.pipelineLayout = &pipelineLayout;
     pipelineDesc.shader = shader;
@@ -145,10 +145,40 @@ bool RunPipeline(test::Context& context, nri::Queue& queue, nri::PipelineLayout&
     TEST_CHECK(context.core.CreateBufferView(viewDesc, outputView));
     context.Track(outputView);
 
+    nri::DescriptorPool* mutablePools[2] = {};
+    nri::DescriptorSet* mutableSets[2] = {};
+    if (useMutable) {
+        nri::DescriptorPoolDesc poolDesc = {};
+        poolDesc.descriptorSetMaxNum = 1;
+        poolDesc.mutableMaxNum = 8;
+        poolDesc.flags = nri::DescriptorPoolBits::COPY_SOURCE;
+        TEST_CHECK(context.core.CreateDescriptorPool(*context.device, poolDesc, mutablePools[0]));
+        context.Track(mutablePools[0]);
+        poolDesc.flags = nri::DescriptorPoolBits::NONE;
+        TEST_CHECK(context.core.CreateDescriptorPool(*context.device, poolDesc, mutablePools[1]));
+        context.Track(mutablePools[1]);
+        TEST_CHECK(context.core.AllocateDescriptorSets(*mutablePools[0], pipelineLayout, 0, &mutableSets[0], 1, 0));
+        TEST_CHECK(context.core.AllocateDescriptorSets(*mutablePools[1], pipelineLayout, 0, &mutableSets[1], 1, 0));
+
+        // Exercise both type changes and copying at the sparse indices consumed by ResourceDescriptorHeap.
+        const nri::UpdateDescriptorRangeDesc updates[] = {
+            {mutableSets[0], 0, 3, &outputView, 1},
+            {mutableSets[0], 0, 7, &inputView, 1},
+            {mutableSets[0], 0, 3, &inputView, 1},
+            {mutableSets[0], 0, 7, &outputView, 1},
+        };
+        context.core.UpdateDescriptorRanges(updates, 4);
+        const nri::CopyDescriptorRangeDesc copies[] = {
+            {mutableSets[1], 0, 3, mutableSets[0], 0, 3, 1},
+            {mutableSets[1], 0, 7, mutableSets[0], 0, 7, 1},
+        };
+        context.core.CopyDescriptorRanges(copies, 2);
+    }
+
     nri::CommandAllocator* commandAllocator = nullptr;
     nri::CommandBuffer* commandBuffer = nullptr;
     TEST_CHECK(context.CreateCommandObjects(queue, commandAllocator, commandBuffer));
-    TEST_CHECK(context.core.BeginCommandBuffer(*commandBuffer, nullptr));
+    TEST_CHECK(context.core.BeginCommandBuffer(*commandBuffer, useMutable ? mutablePools[1] : nullptr));
     context.core.CmdSetPipelineLayout(*commandBuffer, nri::BindPoint::COMPUTE, pipelineLayout);
     context.core.CmdSetPipeline(*commandBuffer, *pipeline);
 
@@ -172,6 +202,8 @@ bool RunPipeline(test::Context& context, nri::Queue& queue, nri::PipelineLayout&
         const nri::WriteResourceDescriptorsDesc writes[] = {{outputView, 7}, {inputView, 3}};
         TEST_CHECK(heap.interface.WriteResourceDescriptors(*heap.object, writes, 2));
         heap.interface.CmdSetDescriptorHeap(*commandBuffer, *heap.object);
+    } else if (useMutable) {
+        context.core.CmdSetDescriptorSet(*commandBuffer, {0, mutableSets[1], nri::BindPoint::COMPUTE});
     } else {
         const nri::SetRootDescriptorDesc rootDescriptors[] = {
             {0, inputView, rootOffset, nri::BindPoint::COMPUTE},
@@ -867,21 +899,30 @@ bool TestNativeLayerBasedMultiview(test::Context& context, nri::Queue& queue) {
     color.format = nri::Format::RGBA8_UNORM;
     color.colorWriteMask = nri::ColorWriteBits::RGBA;
 
-    const uint32_t viewMasks[] = {3, 2, 3, 2};
+    const uint32_t viewMasks[] = {3, 2, 3, 2, 0, 0};
     const char* names[] = {
         "native Metal layer-based multiview readback",
         "native Metal sparse layer-based multiview mapping",
         "native Metal viewport-based multiview readback",
         "native Metal flexible multiview subset mapping",
+        "native shader viewport/layer routing",
+        "converted shader viewport/layer routing",
     };
     bool passed = true;
-    for (uint32_t caseIndex = 0; caseIndex < 4; caseIndex++) {
+    for (uint32_t caseIndex = 0; caseIndex < (context.deviceDesc->features.shaderBytecodeDXIL ? 6u : 5u); caseIndex++) {
+        const bool routing = caseIndex >= 4;
         const bool viewportBased = caseIndex == 2;
         const bool flexible = caseIndex == 3;
         const uint16_t layerNum = viewportBased ? 1 : 2;
         if (flexible) {
             shaders[0] = LoadComputeShader(context, "MetalTests.metallib", "multiviewFlexibleVertex");
             shaders[0].stage = nri::StageBits::VERTEX_SHADER;
+        }
+        if (routing) {
+            shaders[0] = LoadComputeShader(context, caseIndex == 4 ? "MetalTests.metallib" : "MetalRouting.vs.dxil", caseIndex == 4 ? "routingVertex" : "main");
+            shaders[1] = LoadComputeShader(context, caseIndex == 4 ? "MetalTests.metallib" : "MetalRouting.fs.dxil", caseIndex == 4 ? "routingFragment" : "main");
+            shaders[0].stage = nri::StageBits::VERTEX_SHADER;
+            shaders[1].stage = nri::StageBits::FRAGMENT_SHADER;
         }
         nri::GraphicsPipelineDesc pipelineDesc = {};
         pipelineDesc.pipelineLayout = pipelineLayout;
@@ -962,13 +1003,13 @@ bool TestNativeLayerBasedMultiview(test::Context& context, nri::Queue& queue) {
         const nri::Rect scissor = {0, 0, width, height};
         context.core.CmdSetViewports(*commands, &viewport, 1);
         context.core.CmdSetScissors(*commands, &scissor, 1);
-        if (viewportBased) {
+        if (viewportBased || routing) {
             const nri::Viewport viewports[] = {{0, 0, width / 2, height, 0, 1}, {width / 2, 0, width / 2, height, 0, 1}};
             const nri::Rect scissors[] = {scissor, scissor};
             context.core.CmdSetViewports(*commands, viewports, 2);
             context.core.CmdSetScissors(*commands, scissors, 2);
         }
-        context.core.CmdDraw(*commands, {3, 1, 0, 0});
+        context.core.CmdDraw(*commands, {3, routing ? 2u : 1u, 0, 0});
         context.core.CmdEndRendering(*commands);
 
         barrier.before = barrier.after;
@@ -993,7 +1034,9 @@ bool TestNativeLayerBasedMultiview(test::Context& context, nri::Queue& queue) {
             const std::array<uint8_t, 4> expected = caseIndex == 1 || flexible ? (layer == 0 ? std::array<uint8_t, 4>{0, 0, 0, 0} : std::array<uint8_t, 4>{255, 0, 0, 255}) : (layer == 0 ? std::array<uint8_t, 4>{255, 0, 0, 255} : std::array<uint8_t, 4>{0, 255, 0, 255});
             for (uint32_t y = 0; y < height; y++) {
                 for (uint32_t x = 0; x < width; x++) {
-                    const std::array<uint8_t, 4> pixel = viewportBased && x >= width / 2 ? std::array<uint8_t, 4>{0, 255, 0, 255} : expected;
+                    std::array<uint8_t, 4> pixel = viewportBased && x >= width / 2 ? std::array<uint8_t, 4>{0, 255, 0, 255} : expected;
+                    if (routing)
+                        pixel = layer == 0 ? (x >= width / 2 ? std::array<uint8_t, 4>{0, 255, 0, 255} : std::array<uint8_t, 4>{0, 0, 0, 0}) : (x < width / 2 ? std::array<uint8_t, 4>{255, 0, 0, 255} : std::array<uint8_t, 4>{0, 0, 0, 0});
                     for (uint32_t c = 0; c < 4; c++)
                         casePassed &= data[layer * slicePitch + y * rowPitch + x * 4 + c] == pixel[c];
                 }
@@ -1509,6 +1552,360 @@ bool TestWrapping(const test::Settings& settings) {
     return test::Report("wrapped device, queue, buffer and texture retain ownership", passed);
 }
 
+bool TestSamplerBorderColors(test::Context& context) {
+    nri::SamplerDesc desc = {};
+    desc.addressModes.u = nri::AddressMode::CLAMP_TO_BORDER;
+    nri::Descriptor* sampler = nullptr;
+
+    const nri::Color acceptedFloatColors[] = {{{0.0f, 0.0f, 0.0f, 0.0f}}, {{0.0f, 0.0f, 0.0f, 1.0f}}, {{1.0f, 1.0f, 1.0f, 1.0f}}};
+    for (const nri::Color& color : acceptedFloatColors) {
+        desc.borderColor = color;
+        TEST_CHECK(context.core.CreateSampler(*context.device, desc, sampler));
+        context.core.DestroyDescriptor(sampler);
+        sampler = nullptr;
+    }
+
+    desc.isInteger = true;
+    const nri::Color32ui acceptedIntegerColors[] = {{0, 0, 0, 0}, {0, 0, 0, 1}, {1, 1, 1, 1}};
+    for (const nri::Color32ui& color : acceptedIntegerColors) {
+        desc.borderColor.ui = color;
+        TEST_CHECK(context.core.CreateSampler(*context.device, desc, sampler));
+        context.core.DestroyDescriptor(sampler);
+        sampler = nullptr;
+    }
+
+    desc.borderColor.ui = {1, 0, 1, 1};
+    TEST_CHECK(context.core.CreateSampler(*context.device, desc, sampler) == nri::Result::UNSUPPORTED && sampler == nullptr);
+    desc.isInteger = false;
+    desc.borderColor.f = {1.0f, 0.25f, 1.0f, 1.0f};
+    TEST_CHECK(context.core.CreateSampler(*context.device, desc, sampler) == nri::Result::UNSUPPORTED && sampler == nullptr);
+
+    desc.addressModes.u = nri::AddressMode::REPEAT;
+    TEST_CHECK(context.core.CreateSampler(*context.device, desc, sampler));
+    context.core.DestroyDescriptor(sampler);
+
+    return test::Report("Metal sampler border color acceptance boundary", true);
+}
+
+bool TestDynamicVertexStrides(test::Context& context, nri::Queue& queue) {
+    constexpr uint32_t vertexStride = 24;
+    constexpr uint32_t instanceStride = 40;
+    std::array<uint8_t, vertexStride * 3 + 8 * 3> vertices = {};
+    const float positions[][2] = {{-0.5f, -1.0f}, {0.5f, -1.0f}, {-0.5f, 3.0f}};
+    for (uint32_t i = 0; i < 3; i++)
+        memcpy(vertices.data() + i * vertexStride, positions[i], sizeof(positions[i]));
+    memcpy(vertices.data() + vertexStride * 3, positions, sizeof(positions));
+    std::array<uint8_t, instanceStride * 2> instances = {};
+    const float offsets[][2] = {{-0.5f, 0.0f}, {0.5f, 0.0f}};
+    const uint32_t colors[] = {0xFF0000FF, 0xFF00FF00};
+    for (uint32_t i = 0; i < 2; i++) {
+        memcpy(instances.data() + i * instanceStride, offsets[i], sizeof(offsets[i]));
+        memcpy(instances.data() + i * instanceStride + 8, colors + i, sizeof(colors[i]));
+    }
+
+    nri::BufferDesc bufferDesc = {};
+    bufferDesc.usage = nri::BufferUsageBits::VERTEX;
+    bufferDesc.size = vertices.size();
+    nri::Buffer* vertexBuffer = nullptr;
+    TEST_CHECK(context.CreateBuffer(bufferDesc, nri::MemoryLocation::DEVICE, vertexBuffer));
+    bufferDesc.size = instances.size();
+    nri::Buffer* instanceBuffer = nullptr;
+    TEST_CHECK(context.CreateBuffer(bufferDesc, nri::MemoryLocation::DEVICE, instanceBuffer));
+    const nri::BufferUploadDesc uploads[] = {
+        {vertices.data(), vertexBuffer, {nri::AccessBits::VERTEX_BUFFER, nri::StageBits::VERTEX_SHADER}},
+        {instances.data(), instanceBuffer, {nri::AccessBits::VERTEX_BUFFER, nri::StageBits::VERTEX_SHADER}},
+    };
+    TEST_CHECK(context.helper.UploadData(queue, nullptr, 0, uploads, 2));
+
+    nri::PipelineLayoutDesc layoutDesc = {};
+    layoutDesc.shaderStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
+    nri::PipelineLayout* layout = nullptr;
+    TEST_CHECK(context.core.CreatePipelineLayout(*context.device, layoutDesc, layout));
+    context.Track(layout);
+    const nri::VertexStreamDesc streams[] = {{0, nri::VertexStreamStepRate::PER_VERTEX, 0}, {1, nri::VertexStreamStepRate::PER_INSTANCE, 0}};
+    const nri::VertexAttributeDesc attributes[] = {
+        {{"POSITION", 0}, {0}, 0, nri::Format::RG32_SFLOAT, 0},
+        {{"TEXCOORD", 0}, {1}, 0, nri::Format::RG32_SFLOAT, 1},
+        {{"COLOR", 0}, {2}, 8, nri::Format::RGBA8_UNORM, 1},
+    };
+    const nri::VertexInputDesc vertexInput = {attributes, 3, streams, 2};
+    nri::ColorAttachmentDesc color = {};
+    color.format = nri::Format::RGBA8_UNORM;
+    color.colorWriteMask = nri::ColorWriteBits::RGBA;
+
+    bool passed = true;
+    const uint32_t shaderKindNum = context.deviceDesc->features.shaderBytecodeDXIL ? 2 : 1;
+    for (uint32_t shaderKind = 0; shaderKind < shaderKindNum; shaderKind++) {
+        nri::ShaderDesc shaders[] = {
+            LoadComputeShader(context, shaderKind ? "MetalVertexStride.vs.dxil" : "MetalTests.metallib", shaderKind ? nullptr : "vertexStrideVertex"),
+            LoadComputeShader(context, shaderKind ? "MetalVertexStride.fs.dxil" : "MetalTests.metallib", shaderKind ? nullptr : "vertexStrideFragment"),
+        };
+        shaders[0].stage = nri::StageBits::VERTEX_SHADER;
+        shaders[1].stage = nri::StageBits::FRAGMENT_SHADER;
+        nri::GraphicsPipelineDesc pipelineDesc = {};
+        pipelineDesc.pipelineLayout = layout;
+        pipelineDesc.vertexInput = &vertexInput;
+        pipelineDesc.inputAssembly.topology = nri::Topology::TRIANGLE_LIST;
+        pipelineDesc.rasterization.cullMode = nri::CullMode::NONE;
+        pipelineDesc.outputMerger.colors = &color;
+        pipelineDesc.outputMerger.colorNum = 1;
+        pipelineDesc.shaders = shaders;
+        pipelineDesc.shaderNum = 2;
+        nri::Pipeline* pipeline = nullptr;
+        TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, pipelineDesc, pipeline));
+        context.Track(pipeline);
+
+        nri::TextureDesc targetDesc = {};
+        targetDesc.type = nri::TextureType::TEXTURE_2D;
+        targetDesc.format = color.format;
+        targetDesc.usage = nri::TextureUsageBits::COLOR_ATTACHMENT;
+        targetDesc.width = 4;
+        targetDesc.height = 1;
+        nri::Texture* target = nullptr;
+        TEST_CHECK(context.CreateTexture(targetDesc, nri::MemoryLocation::DEVICE, target));
+        nri::TextureViewDesc viewDesc = {};
+        viewDesc.texture = target;
+        viewDesc.type = nri::TextureView::COLOR_ATTACHMENT;
+        viewDesc.format = color.format;
+        viewDesc.mipNum = 1;
+        viewDesc.layerNum = 1;
+        viewDesc.sliceNum = 1;
+        nri::Descriptor* targetView = nullptr;
+        TEST_CHECK(context.core.CreateTextureView(viewDesc, targetView));
+        context.Track(targetView);
+        bufferDesc = {};
+        bufferDesc.size = 256;
+        nri::Buffer* readback = nullptr;
+        TEST_CHECK(context.CreateBuffer(bufferDesc, nri::MemoryLocation::HOST_READBACK, readback));
+
+        nri::CommandAllocator* allocator = nullptr;
+        nri::CommandBuffer* commands = nullptr;
+        TEST_CHECK(context.CreateCommandObjects(queue, allocator, commands));
+        TEST_CHECK(context.core.BeginCommandBuffer(*commands, nullptr));
+        nri::TextureBarrierDesc barrier = {};
+        barrier.texture = target;
+        barrier.mipNum = 1;
+        barrier.layerNum = 1;
+        barrier.after = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+        nri::BarrierDesc barriers = {};
+        barriers.textures = &barrier;
+        barriers.textureNum = 1;
+        context.core.CmdBarrier(*commands, barriers);
+        nri::AttachmentDesc attachment = {};
+        attachment.descriptor = targetView;
+        attachment.loadOp = nri::LoadOp::CLEAR;
+        attachment.storeOp = nri::StoreOp::STORE;
+        nri::RenderingDesc rendering = {};
+        rendering.colors = &attachment;
+        rendering.colorNum = 1;
+        context.core.CmdBeginRendering(*commands, rendering);
+        context.core.CmdSetPipelineLayout(*commands, nri::BindPoint::GRAPHICS, *layout);
+        context.core.CmdSetPipeline(*commands, *pipeline);
+        const nri::VertexBufferDesc vertexBinding = {vertexBuffer, 0, vertexStride};
+        const nri::VertexBufferDesc instanceBinding = {instanceBuffer, 0, instanceStride};
+        context.core.CmdSetVertexBuffers(*commands, 0, &vertexBinding, 1);
+        context.core.CmdSetVertexBuffers(*commands, 1, &instanceBinding, 1);
+        const nri::Viewport viewport = {0, 0, 2, 1, 0, 1};
+        const nri::Rect scissor = {0, 0, 4, 1};
+        context.core.CmdSetViewports(*commands, &viewport, 1);
+        context.core.CmdSetScissors(*commands, &scissor, 1);
+        context.core.CmdDraw(*commands, {3, 2, 0, 0});
+        const nri::VertexBufferDesc packedBinding = {vertexBuffer, vertexStride * 3, 8};
+        context.core.CmdSetVertexBuffers(*commands, 0, &packedBinding, 1);
+        const nri::Viewport secondViewport = {2, 0, 2, 1, 0, 1};
+        context.core.CmdSetViewports(*commands, &secondViewport, 1);
+        context.core.CmdDraw(*commands, {3, 2, 0, 0});
+        context.core.CmdEndRendering(*commands);
+        barrier.before = barrier.after;
+        barrier.after = {nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY};
+        context.core.CmdBarrier(*commands, barriers);
+        const nri::TextureRegionDesc region = {0, 0, 0, 4, 1, 1, 0, 0};
+        const nri::TextureDataLayoutDesc dataLayout = {0, 256, 256};
+        context.core.CmdReadbackTextureToBuffer(*commands, *readback, dataLayout, *target, region);
+        TEST_CHECK(context.SubmitAndWait(queue, *commands));
+        const uint32_t* data = (const uint32_t*)context.core.MapBuffer(*readback, 0, nri::WHOLE_SIZE);
+        TEST_CHECK(data != nullptr);
+        const bool casePassed = data[0] == colors[0] && data[1] == colors[1] && data[2] == colors[0] && data[3] == colors[1];
+        context.core.UnmapBuffer(*readback);
+        passed &= test::Report(shaderKind ? "converted stage-in dynamic asymmetric vertex strides" : "native stage-in dynamic asymmetric vertex strides", casePassed);
+    }
+
+    return passed;
+}
+
+bool TestSamplerLodBias(test::Context& context, nri::Queue& queue) {
+    constexpr uint16_t textureSize = 4;
+    constexpr uint32_t rowPitch = 256;
+    const std::array<std::array<uint8_t, 4>, 3> mipColors = {{{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}}};
+    std::array<std::vector<uint8_t>, 3> mipData;
+    std::array<nri::TextureSubresourceUploadDesc, 3> subresources = {};
+    for (uint32_t mip = 0; mip < 3; mip++) {
+        const uint32_t size = textureSize >> mip;
+        mipData[mip].resize(size * size * 4);
+        for (size_t i = 0; i < mipData[mip].size(); i += 4)
+            memcpy(mipData[mip].data() + i, mipColors[mip].data(), 4);
+        subresources[mip] = {mipData[mip].data(), 1, size * 4, size * size * 4};
+    }
+
+    nri::TextureDesc sourceDesc = {};
+    sourceDesc.type = nri::TextureType::TEXTURE_2D;
+    sourceDesc.format = nri::Format::RGBA8_UNORM;
+    sourceDesc.usage = nri::TextureUsageBits::SHADER_RESOURCE;
+    sourceDesc.width = textureSize;
+    sourceDesc.height = textureSize;
+    sourceDesc.mipNum = 3;
+    nri::Texture* source = nullptr;
+    TEST_CHECK(context.CreateTexture(sourceDesc, nri::MemoryLocation::DEVICE, source));
+    const nri::TextureUploadDesc upload = {subresources.data(), source, {nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE, nri::StageBits::FRAGMENT_SHADER}, nri::PlaneBits::COLOR};
+    TEST_CHECK(context.helper.UploadData(queue, &upload, 1, nullptr, 0));
+
+    nri::TextureViewDesc sourceViewDesc = {};
+    sourceViewDesc.texture = source;
+    sourceViewDesc.type = nri::TextureView::TEXTURE;
+    sourceViewDesc.format = sourceDesc.format;
+    sourceViewDesc.mipNum = 3;
+    sourceViewDesc.layerNum = 1;
+    sourceViewDesc.sliceNum = 1;
+    nri::Descriptor* sourceView = nullptr;
+    TEST_CHECK(context.core.CreateTextureView(sourceViewDesc, sourceView));
+    context.Track(sourceView);
+
+    const nri::DescriptorRangeDesc ranges[] = {
+        {0, 1, nri::DescriptorType::TEXTURE, nri::StageBits::FRAGMENT_SHADER},
+        {0, 1, nri::DescriptorType::SAMPLER, nri::StageBits::FRAGMENT_SHADER},
+    };
+    nri::DescriptorSetDesc setDesc = {};
+    setDesc.ranges = ranges;
+    setDesc.rangeNum = 2;
+    nri::PipelineLayoutDesc layoutDesc = {};
+    layoutDesc.descriptorSets = &setDesc;
+    layoutDesc.descriptorSetNum = 1;
+    layoutDesc.shaderStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
+    nri::PipelineLayout* layout = nullptr;
+    TEST_CHECK(context.core.CreatePipelineLayout(*context.device, layoutDesc, layout));
+    context.Track(layout);
+
+    nri::DescriptorPoolDesc poolDesc = {};
+    poolDesc.descriptorSetMaxNum = 4;
+    poolDesc.textureMaxNum = 4;
+    poolDesc.samplerMaxNum = 4;
+    nri::DescriptorPool* pool = nullptr;
+    TEST_CHECK(context.core.CreateDescriptorPool(*context.device, poolDesc, pool));
+    context.Track(pool);
+
+    nri::ColorAttachmentDesc color = {};
+    color.format = nri::Format::RGBA8_UNORM;
+    color.colorWriteMask = nri::ColorWriteBits::RGBA;
+    bool passed = true;
+    const bool convertedSupported = context.deviceDesc->features.shaderBytecodeDXIL;
+    for (uint32_t shaderKind = 0; shaderKind < (convertedSupported ? 2u : 1u); shaderKind++) {
+        nri::ShaderDesc shaders[] = {
+            LoadComputeShader(context, shaderKind ? "MetalSamplerLodBias.vs.dxil" : "MetalTests.metallib", shaderKind ? nullptr : "samplerLodBiasVertex"),
+            LoadComputeShader(context, shaderKind ? "MetalSamplerLodBias.fs.dxil" : "MetalTests.metallib", shaderKind ? nullptr : "samplerLodBiasFragment"),
+        };
+        shaders[0].stage = nri::StageBits::VERTEX_SHADER;
+        shaders[1].stage = nri::StageBits::FRAGMENT_SHADER;
+        nri::GraphicsPipelineDesc pipelineDesc = {};
+        pipelineDesc.pipelineLayout = layout;
+        pipelineDesc.inputAssembly.topology = nri::Topology::TRIANGLE_LIST;
+        pipelineDesc.outputMerger.colors = &color;
+        pipelineDesc.outputMerger.colorNum = 1;
+        pipelineDesc.shaders = shaders;
+        pipelineDesc.shaderNum = 2;
+        nri::Pipeline* pipeline = nullptr;
+        TEST_CHECK(context.core.CreateGraphicsPipeline(*context.device, pipelineDesc, pipeline));
+        context.Track(pipeline);
+
+        for (uint32_t biasIndex = 0; biasIndex < 2; biasIndex++) {
+            const float bias = biasIndex ? -1.0f : 1.0f;
+            const uint16_t outputSize = biasIndex ? 2 : 4;
+            nri::SamplerDesc samplerDesc = {};
+            samplerDesc.mipBias = bias;
+            samplerDesc.mipMax = 2.0f;
+            nri::Descriptor* sampler = nullptr;
+            TEST_CHECK(context.core.CreateSampler(*context.device, samplerDesc, sampler));
+            context.Track(sampler);
+            nri::DescriptorSet* set = nullptr;
+            TEST_CHECK(context.core.AllocateDescriptorSets(*pool, *layout, 0, &set, 1, 0));
+            const nri::UpdateDescriptorRangeDesc updates[] = {{set, 0, 0, &sourceView, 1}, {set, 1, 0, &sampler, 1}};
+            context.core.UpdateDescriptorRanges(updates, 2);
+
+            nri::TextureDesc targetDesc = sourceDesc;
+            targetDesc.usage = nri::TextureUsageBits::COLOR_ATTACHMENT;
+            targetDesc.width = outputSize;
+            targetDesc.height = outputSize;
+            targetDesc.mipNum = 1;
+            nri::Texture* target = nullptr;
+            TEST_CHECK(context.CreateTexture(targetDesc, nri::MemoryLocation::DEVICE, target));
+            nri::TextureViewDesc targetViewDesc = sourceViewDesc;
+            targetViewDesc.texture = target;
+            targetViewDesc.type = nri::TextureView::COLOR_ATTACHMENT;
+            targetViewDesc.mipNum = 1;
+            nri::Descriptor* targetView = nullptr;
+            TEST_CHECK(context.core.CreateTextureView(targetViewDesc, targetView));
+            context.Track(targetView);
+            nri::BufferDesc readbackDesc = {};
+            readbackDesc.size = rowPitch * outputSize;
+            nri::Buffer* readback = nullptr;
+            TEST_CHECK(context.CreateBuffer(readbackDesc, nri::MemoryLocation::HOST_READBACK, readback));
+
+            nri::CommandAllocator* allocator = nullptr;
+            nri::CommandBuffer* commands = nullptr;
+            TEST_CHECK(context.CreateCommandObjects(queue, allocator, commands));
+            TEST_CHECK(context.core.BeginCommandBuffer(*commands, pool));
+            nri::TextureBarrierDesc barrier = {};
+            barrier.texture = target;
+            barrier.mipNum = 1;
+            barrier.layerNum = 1;
+            barrier.after = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+            nri::BarrierDesc barriers = {};
+            barriers.textures = &barrier;
+            barriers.textureNum = 1;
+            context.core.CmdBarrier(*commands, barriers);
+            nri::AttachmentDesc attachment = {};
+            attachment.descriptor = targetView;
+            attachment.loadOp = nri::LoadOp::CLEAR;
+            attachment.storeOp = nri::StoreOp::STORE;
+            nri::RenderingDesc rendering = {};
+            rendering.colors = &attachment;
+            rendering.colorNum = 1;
+            context.core.CmdBeginRendering(*commands, rendering);
+            context.core.CmdSetPipelineLayout(*commands, nri::BindPoint::GRAPHICS, *layout);
+            context.core.CmdSetPipeline(*commands, *pipeline);
+            context.core.CmdSetDescriptorSet(*commands, {0, set, nri::BindPoint::GRAPHICS});
+            const nri::Viewport viewport = {0, 0, float(outputSize), float(outputSize), 0, 1};
+            const nri::Rect scissor = {0, 0, outputSize, outputSize};
+            context.core.CmdSetViewports(*commands, &viewport, 1);
+            context.core.CmdSetScissors(*commands, &scissor, 1);
+            context.core.CmdDraw(*commands, {3, 1, 0, 0});
+            context.core.CmdEndRendering(*commands);
+            barrier.before = barrier.after;
+            barrier.after = {nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY};
+            context.core.CmdBarrier(*commands, barriers);
+            nri::TextureRegionDesc region = {};
+            region.width = outputSize;
+            region.height = outputSize;
+            region.depth = 1;
+            const nri::TextureDataLayoutDesc dataLayout = {0, rowPitch, rowPitch * outputSize};
+            context.core.CmdReadbackTextureToBuffer(*commands, *readback, dataLayout, *target, region);
+            TEST_CHECK(context.SubmitAndWait(queue, *commands));
+            const uint8_t* data = (const uint8_t*)context.core.MapBuffer(*readback, 0, nri::WHOLE_SIZE);
+            TEST_CHECK(data != nullptr);
+            bool casePassed = true;
+            for (uint32_t y = 0; y < outputSize; y++)
+                for (uint32_t x = 0; x < outputSize; x++)
+                    casePassed &= memcmp(data + y * rowPitch + x * 4, mipColors[biasIndex ? 0 : 1].data(), 4) == 0;
+            if (!casePassed)
+                printf("Sampler LOD bias output: %u,%u,%u,%u\n", data[0], data[1], data[2], data[3]);
+            context.core.UnmapBuffer(*readback);
+            const char* name = shaderKind ? (biasIndex ? "converted negative sampler LOD bias readback" : "converted positive sampler LOD bias readback") : (biasIndex ? "native negative sampler LOD bias readback" : "native positive sampler LOD bias readback");
+            passed &= test::Report(name, casePassed);
+        }
+    }
+
+    return passed;
+}
+
 bool Run(const test::Settings& settings) {
     if (settings.graphicsAPI != nri::GraphicsAPI::METAL) {
         printf("SKIP  MetalTests requires Metal\n");
@@ -1573,6 +1970,18 @@ bool Run(const test::Settings& settings) {
         std::vector<uint32_t> heapResult;
         TEST_CHECK(RunPipeline(context, *queue, *heapLayout, heapShader, "direct descriptor heap compute", input, initialOutput, descriptorOffset * 3, 0, constants, heapResult, true));
         TEST_CHECK(test::Report("descriptor heap and root descriptor equivalence", heapResult == nativeResult));
+
+        const nri::DescriptorRangeDesc mutableRange = {0, 8, nri::DescriptorType::MUTABLE, nri::StageBits::COMPUTE_SHADER, nri::DescriptorRangeBits::PARTIALLY_BOUND};
+        const nri::DescriptorSetDesc mutableSet = {0, &mutableRange, 1};
+        nri::PipelineLayoutDesc mutableLayoutDesc = layoutDesc;
+        mutableLayoutDesc.descriptorSets = &mutableSet;
+        mutableLayoutDesc.descriptorSetNum = 1;
+        nri::PipelineLayout* mutableLayout = nullptr;
+        TEST_CHECK(context.core.CreatePipelineLayout(*context.device, mutableLayoutDesc, mutableLayout));
+        context.Track(mutableLayout);
+        std::vector<uint32_t> mutableResult;
+        TEST_CHECK(RunPipeline(context, *queue, *mutableLayout, heapShader, "mutable descriptor update/copy/type-change compute", input, initialOutput, descriptorOffset * 3, 0, constants, mutableResult, false, true));
+        TEST_CHECK(test::Report("mutable descriptors and descriptor heap equivalence", mutableResult == heapResult));
     } else {
         printf("SKIP  DXIL bytecode is unsupported\n");
     }
@@ -1598,6 +2007,9 @@ bool Run(const test::Settings& settings) {
     TEST_CHECK(TestAttachmentClears(context, *queue, nri::Format::R32_SINT, true));
     TEST_CHECK(TestAttachmentClears(context, *queue, nri::Format::D32_SFLOAT_S8_UINT));
     TEST_CHECK(TestNativeRayDispatch(context, *queue));
+    TEST_CHECK(TestDynamicVertexStrides(context, *queue));
+    TEST_CHECK(TestSamplerLodBias(context, *queue));
+    TEST_CHECK(TestSamplerBorderColors(context));
     TEST_CHECK(TestWrapping(settings));
 
     nri::VideoMemoryInfo memoryInfo = {};
