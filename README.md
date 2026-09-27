@@ -27,6 +27,14 @@ Or by running scripts only:
 - Run `./1-Deploy.sh`
 - RUn `./2-Build.sh`
 
+### macOS
+
+- Install **Xcode** 26+ and the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- Install **VulkanSDK** (provides *DXC*, required to compile shaders, and *Vulkan* through *MoltenVK*)
+- Install **Metal Shader Converter** to run the samples on *Metal* (HLSL → DXIL → Metal, enabled automatically if installed, *Metal* becomes the default API; otherwise *Vulkan* is used)
+- Clone project and init submodules
+- Generate and build project using **cmake**
+
 ### CMake options
 
 - `DISABLE_SHADER_COMPILATION` - disable compilation of shaders (shaders can be built on other platform)
