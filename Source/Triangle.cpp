@@ -675,6 +675,11 @@ void Sample::RenderFrame(uint32_t frameIndex) {
 
         const nri::ImguiRenderData imguiRenderData = CmdCopyImguiData(*commandBuffer, *m_Streamer);
 
+        // Order scene attachment writes before the UI load and blending.
+        textureBarriers.before = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT};
+        textureBarriers.after = textureBarriers.before;
+        NRI.CmdBarrier(*commandBuffer, barrierDesc);
+
         NRI.CmdBeginRendering(*commandBuffer, renderingDesc);
         {
             helper::Annotation annotation(NRI, *commandBuffer, "UI");
