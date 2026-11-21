@@ -105,7 +105,7 @@ endfunction()
 fix_folders("External/NRIFramework" "External")
 
 # Shaders
-file(GLOB_RECURSE SHADERS "Shaders/*.hlsl" "Shaders/*.hlsli")
+file(GLOB_RECURSE SHADERS "Shaders/*.hlsl" "Shaders/*.hlsli" "Shaders/*.metal" "Shaders/*.metal.h")
 set_source_files_properties(${SHADERS} PROPERTIES VS_TOOL_OVERRIDE "None")
 
 get_target_property(ML_SOURCE_DIR MathLib SOURCE_DIR)
@@ -139,6 +139,13 @@ if(NRI_ENABLE_D3D12_SUPPORT)
     set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p DXIL --compiler "${SHADERMAKE_DXC_PATH}" ${SHADERMAKE_GENERAL_ARGS})
 elseif(NRI_ENABLE_METAL_SHADER_CONVERTER)
     set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p DXIL --compiler "${SHADERMAKE_DXC_PATH}" ${SHADERMAKE_GENERAL_ARGS} -D NRI_METAL_DXIL)
+endif()
+
+if(NRI_ENABLE_METAL_SUPPORT)
+    # Native MSL shaders ("Shaders/*.metal", see "NRI.metal"), compiled into ".metallib"
+    set(SHADERMAKE_METAL_ARGS ${SHADERMAKE_GENERAL_ARGS})
+    list(TRANSFORM SHADERMAKE_METAL_ARGS REPLACE "^Shaders/Shaders.cfg$" "Shaders/ShadersMetal.cfg")
+    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p METAL ${SHADERMAKE_METAL_ARGS})
 endif()
 
 if(NRI_ENABLE_VK_SUPPORT)

@@ -19,6 +19,8 @@ public:
     ~Sample();
 
 private:
+    void InitCmdLine(cmdline::parser& cmdLine) override;
+    void ReadCmdLine(cmdline::parser& cmdLine) override;
     bool Initialize(nri::GraphicsAPI graphicsAPI, bool) override;
     void LatencySleep(uint32_t frameIndex) override;
     void RenderFrame(uint32_t frameIndex) override;
@@ -68,7 +70,37 @@ private:
     const SwapChainTexture* m_BackBuffer = nullptr;
     std::vector<SwapChainTexture> m_SwapChainTextures;
     std::vector<nri::Memory*> m_MemoryAllocations;
+
+    bool m_NativeShaders = false;
 };
+
+void Sample::InitCmdLine(cmdline::parser& cmdLine) {
+    cmdLine.add("nativeShaders", 0, "Metal: use the native MSL ray tracing shaders (\"*.metallib\") instead of HLSL");
+}
+
+void Sample::ReadCmdLine(cmdline::parser& cmdLine) {
+    m_NativeShaders = cmdLine.exist("nativeShaders");
+}
+
+// Native Metal ray tracing shaders ("Shaders/RayTracingTriangle.*.metal"), loaded even if the shader converter is enabled
+static nri::ShaderDesc LoadNativeMetalShader(const char* shaderName, nri::StageBits stage, utils::ShaderCodeStorage& storage, const char* entryPointName) {
+    std::string path = utils::GetFullPath(std::string(shaderName) + ".metallib", utils::DataFolder::SHADERS);
+
+    storage.push_back(std::vector<uint8_t>());
+    std::vector<uint8_t>& code = storage.back();
+    if (!utils::LoadFile(path, code)) {
+        printf("ERROR: can't load '%s'!\n", path.c_str());
+        NRI_ABORT_ON_FALSE(false);
+    }
+
+    nri::ShaderDesc shaderDesc = {};
+    shaderDesc.stage = stage;
+    shaderDesc.bytecode = code.data();
+    shaderDesc.size = code.size();
+    shaderDesc.entryPointName = entryPointName;
+
+    return shaderDesc;
+}
 
 Sample::~Sample() {
     if (NRI.HasCore()) {
@@ -353,11 +385,16 @@ void Sample::CreateRayTracingPipeline() {
 
     const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
     utils::ShaderCodeStorage shaderCodeStorage;
-    nri::ShaderDesc shaders[] = {
-        utils::LoadShader(deviceDesc.graphicsAPI, "RayTracingTriangle.rgen", shaderCodeStorage, "raygen"),
-        utils::LoadShader(deviceDesc.graphicsAPI, "RayTracingTriangle.rmiss", shaderCodeStorage, "miss"),
-        utils::LoadShader(deviceDesc.graphicsAPI, "RayTracingTriangle.rchit", shaderCodeStorage, "closest_hit"),
-    };
+    nri::ShaderDesc shaders[3] = {};
+    if (m_NativeShaders && deviceDesc.graphicsAPI == nri::GraphicsAPI::METAL) {
+        shaders[0] = LoadNativeMetalShader("RayTracingTriangle.rgen", nri::StageBits::RAYGEN_SHADER, shaderCodeStorage, "raygen");
+        shaders[1] = LoadNativeMetalShader("RayTracingTriangle.rmiss", nri::StageBits::MISS_SHADER, shaderCodeStorage, "miss");
+        shaders[2] = LoadNativeMetalShader("RayTracingTriangle.rchit", nri::StageBits::CLOSEST_HIT_SHADER, shaderCodeStorage, "closest_hit");
+    } else {
+        shaders[0] = utils::LoadShader(deviceDesc.graphicsAPI, "RayTracingTriangle.rgen", shaderCodeStorage, "raygen");
+        shaders[1] = utils::LoadShader(deviceDesc.graphicsAPI, "RayTracingTriangle.rmiss", shaderCodeStorage, "miss");
+        shaders[2] = utils::LoadShader(deviceDesc.graphicsAPI, "RayTracingTriangle.rchit", shaderCodeStorage, "closest_hit");
+    }
 
     nri::ShaderLibraryDesc shaderLibrary = {};
     shaderLibrary.shaders = shaders;
